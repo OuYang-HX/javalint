@@ -119,7 +119,7 @@ export class ParamResolver {
     type: string,
     parts: ParamPart[],
   ): ParamSourceInfo {
-    const isHardcoded = parts.some(p => p.kind === 'hardcoded' || p.kind === 'whitelist');
+    const isHardcoded = parts.some(p => p.kind === 'hardcoded');
     const isExternalInput = parts.some(p => p.kind === 'external_input');
     const isTainted = parts.some(p => p.kind === 'external_input' || p.kind === 'tainted');
     const isResolvable = parts.every(p => p.kind !== 'unknown');
@@ -280,32 +280,9 @@ export class ParamResolver {
     // Step 1: 是否是所在方法的参数？
     const methodParam = this.findMethodParam(varName, callSite, scanResults);
     if (methodParam) {
-      const isExternal = EXTERNAL_INPUT_PATTERNS.some(p => p.test(varName));
-      if (isExternal) {
-        // 参数名暗示外部输入 (如 userInput, requestParam)
-        // Controller 类 → 明确 external_input (high risk)
-        // 普通类 → tainted (medium risk, 溯源截断在普通函数)
-        if (this.isSpringHandlerClass(callSite)) {
-          const crossFile = this.findCrossFileSource(callSite);
-          const part: ParamPart = {
-            kind: 'external_input',
-            source: 'method_parameter',
-            name: varName,
-            type: methodParam.type,
-            crossFile: !!crossFile,
-          };
-          if (crossFile) {
-            part.callerMethod = crossFile.qualifiedName;
-            part.callerFile = crossFile.filePath;
-          }
-          return [part];
-        }
-        // 普通类 — 参数名暗示外部输入但无法确认
-        return [{ kind: 'tainted', source: 'method_parameter', name: varName, type: methodParam.type }];
-      }
-      // 非外部输入的方法参数
-      // Controller 类 → 明确外部输入 (high risk)
-      // 普通类 → 不确定污点 (medium risk, 溯源截断在普通函数)
+      // 方法参数是否是外部输入，只由 Controller 注解事实决定
+      // @RestController/@GetMapping 等注解 → 方法参数来自 HTTP 请求 (语法事实)
+      // 普通类 → 参数来源不确定，视为潜在污点
       if (this.isSpringHandlerClass(callSite)) {
         const crossFile = this.findCrossFileSource(callSite);
         const part: ParamPart = {
@@ -321,7 +298,7 @@ export class ParamResolver {
         }
         return [part];
       }
-      // 普通方法参数 — 无法确定来源，视为潜在污点
+      // 普通方法参数 — 来源不确定，视为潜在污点
       return [{ kind: 'tainted', source: 'method_parameter', name: varName, type: methodParam.type }];
     }
 
@@ -334,26 +311,6 @@ export class ParamResolver {
     // Step 3: 是否是局部变量赋值？
     const localParts = this.traceLocalVariableAssignment(varName, callSite, scanResults);
     if (localParts) return localParts;
-
-    // Step 5: 变量名匹配外部输入模式（模糊匹配）
-    if (EXTERNAL_INPUT_PATTERNS.some(p => p.test(varName))) {
-      if (this.isSpringHandlerClass(callSite)) {
-        const crossFile = this.findCrossFileSource(callSite);
-        const part: ParamPart = {
-          kind: 'external_input',
-          source: 'variable_pattern',
-          name: varName,
-          crossFile: !!crossFile,
-        };
-        if (crossFile) {
-          part.callerMethod = crossFile.qualifiedName;
-          part.callerFile = crossFile.filePath;
-        }
-        return [part];
-      }
-      // 普通类 — 变量名暗示外部输入但无法确认
-      return [{ kind: 'tainted', source: 'variable_pattern', name: varName }];
-    }
 
     // Fallback: 无法确定来源的变量 → 视为潜在污点
     return [{ kind: 'tainted', source: 'unresolved', name: varName }];
@@ -473,18 +430,20 @@ export class ParamResolver {
       const receiver = methodMatch[1]!;
       const method = methodMatch[2]!;
 
-      // ── 特殊方法: 白名单/安全模式识别 ──
-      // List.get(index) → receiver 是白名单/配置列表时，返回值是安全的
-      const safeListPatterns = [
-        /WHITELIST/i, /ALLOWED/i, /SAFE_LIST/i, /PERMITTED/i,
-        /VALID_COMMANDS/i, /TRUSTED/i, /APPROVED/i,
-      ];
-      if (method === 'get' && safeListPatterns.some(p => p.test(receiver))) {
-        return [{
-          kind: 'whitelist',
-          value: `${receiver}.get(index)`,
-          methodSignature: `${receiver}.get(index)`,
-        }];
+      // ── 实例 passthrough 方法: List.get / Map.get 等 ──
+      // 这些方法的返回值来源 = 集合中元素的来源
+      // 追踪 receiver 变量的赋值来源（如 COMMAND_WHITELIST 的初始化）
+      const instancePassthrough = ['get', 'iterator', 'stream', 'toArray'];
+      if (instancePassthrough.includes(method) && scanResults) {
+        const receiverParts = this.traceVariableParts(receiver, callSite, scanResults);
+        if (receiverParts.length > 0) {
+          return receiverParts.map(part => ({
+            ...part,
+            methodSignature: part.methodSignature
+              ? `${part.methodSignature} → ${receiver}.${method}()`
+              : `${receiver}.${method}()`,
+          }));
+        }
       }
 
       // ── 静态 passthrough 方法: Arrays.asList / Collections.unmodifiableList 等 ──
