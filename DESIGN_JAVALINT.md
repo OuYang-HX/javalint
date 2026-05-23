@@ -366,20 +366,61 @@ interface TaintChainInfo {
 
 ### 4.6 ParamResolver — 参数来源解析
 
-**文件**: `src/rules/param-resolver.ts` (673 行)
+**文件**: `src/rules/param-resolver.ts` (~660 行)
 
 **职责**: 解析危险函数每个参数的来源，输出结构化的 `ParamSourceInfo`。
 
-**解析策略**（按优先级）:
+#### 三级风险模型（纯静态分析，无语义猜测）
+
+JavaLint 只依据**语法事实**判断参数来源，不猜测变量名语义：
+
+| kind | 含义 | 判断依据 | 规则风险 |
+|---|---|---|---|
+| `external_input` | 确认的外部输入 | `@RestController`/`@GetMapping` 注解（语法事实） | HIGH |
+| `tainted` | 来源不确定的参数 | 普通方法参数或未溯源变量 | MEDIUM |
+| `hardcoded` | 确认的硬编码 | 字面量 / `static final String` 常量（语法事实） | 不告警 |
+
+**已删除的语义猜测**（v0.2.1 移除）:
+
+| 已删除 | 原因 |
+|---|---|
+| `EXTERNAL_INPUT_PATTERNS` 变量名匹配 `/user\|input\|param/i` | 变量名包含 `user` 不等于外部输入 |
+| `safeListPatterns` 变量名匹配 `/WHITELIST\|ALLOWED\|TRUSTED/i` | 变量名叫 `WHITELIST` 不等于内容安全 |
+
+**保留的语法事实判断**:
+
+| 判断 | 依据 |
+|---|---|
+| `@RestController` → 方法参数是外部输入 | 注解是语法事实，框架契约 |
+| `@GetMapping`/`@PostMapping` → HTTP 端点 | 同上 |
+| `static final String X = "hello"` → hardcoded | 字面量赋值是语法事实 |
+| 普通方法参数 → tainted | 静态分析无法确认来源 |
+
+#### 解析策略（按优先级）
 
 | # | 策略 | 输入示例 | 输出 parts |
 |---|---|---|---|
 | 1 | 硬编码字面量 | `"SELECT * FROM users"` | `[{kind:"hardcoded", value:"SELECT..."}]` |
-| 2 | 变量名 → 参数匹配 | `stmt.executeQuery(sql)` | 追踪 `sql` 变量的赋值来源 |
-| 3 | 字符串拼接拆分 | `"WHERE id=" + id` | `[{kind:"hardcoded",...}, {kind:"external_input",...}]` |
-| 4 | 方法调用返回值 | `SECRET_KEY.getBytes()` | `[{kind:"hardcoded", value:"MySuperSec...", methodSignature:"SECRET_KEY.getBytes()"}]` |
+| 2 | 方法参数匹配 + Controller 检测 | `stmt.executeQuery(sql)` | 追踪 `sql` 变量 → Controller → `external_input` / 普通类 → `tainted` |
+| 3 | 字符串拼接拆分 | `"WHERE id=" + id` | `[{kind:"hardcoded",...}, {kind:"tainted",...}]` |
+| 4 | 方法调用返回值（passthrough） | `SECRET_KEY.getBytes()` | `[{kind:"hardcoded", value:"MySuperSec...", methodSignature:"SECRET_KEY.getBytes()"}]` |
 | 5 | 字段访问 | `this.connection` | `[{kind:"field", fieldName:"connection"}]` |
 | 6 | static final String 常量求解 | `DB_PASSWORD` | `[{kind:"hardcoded", value:"admin123", fieldName:"DB_PASSWORD"}]` |
+| 7 | 未解析变量 fallback | 任何无法追踪的变量 | `[{kind:"tainted", source:"unresolved", name:varName}]` |
+
+#### isSpringHandlerClass() — 三层检测策略
+
+判断当前方法是否属于 Spring Handler（HTTP 端点），只依据注解事实：
+
+1. **类名后缀**: `*Controller`, `*RestController`
+2. **类级注解**: `@RestController`, `@Controller`
+3. **方法级注解**: `@GetMapping`, `@PostMapping`, `@RequestMapping`, `@PutMapping`, `@DeleteMapping`, `@PatchMapping`
+
+任一匹配 → 该方法所有参数标记为 `external_input`。
+
+#### traceLocalVariableAssignment — 注释行跳过
+
+v0.2.1 修复：遍历方法体查找赋值时，跳过以 `//`、`*`、`/*` 开头的注释行，避免注释中的示例代码干扰参数追踪。
 
 **static final String 常量求解**（v0.2.0 新增）:
 
@@ -409,8 +450,8 @@ interface ParamSourceInfo {
   type: string;
   // ── 布尔标志（脚本直接用属性判断）──
   isHardcoded: boolean;      // 有硬编码部分
-  isExternalInput: boolean;  // 有外部输入部分
-  isTainted: boolean;        // 有污点部分
+  isExternalInput: boolean;  // 有外部输入部分 (Controller 注解事实)
+  isTainted: boolean;        // 有污点部分 (external_input || tainted)
   isResolvable: boolean;     // 所有 part 都可解析
   // ── 组合方式 ──
   composite: 'direct' | 'concat' | 'method_return' | 'field' | 'unknown';
@@ -420,12 +461,12 @@ interface ParamSourceInfo {
 }
 
 interface ParamPart {
-  kind: 'hardcoded' | 'external_input' | 'method_return' | 'field' | 'variable' | 'unknown';
+  kind: 'hardcoded' | 'external_input' | 'tainted' | 'method_return' | 'field' | 'variable' | 'unknown';
   // kind 决定哪些字段有值：
   value?: string;            // hardcoded
-  source?: string;           // external_input: 'method_parameter' | 'servlet_request' | ...
-  name?: string;             // external_input: 参数名
-  type?: string;             // external_input: 参数类型
+  source?: string;           // external_input: 'method_parameter' | tainted: 'method_parameter' | 'unresolved'
+  name?: string;             // external_input / tainted: 参数名
+  type?: string;             // external_input / tainted: 参数类型
   crossFile?: boolean;       // external_input: 是否跨文件
   callerMethod?: string;     // external_input: 跨文件调用者方法
   callerFile?: string;       // external_input: 跨文件调用者文件
@@ -440,17 +481,23 @@ interface ParamPart {
 
 ```javascript
 // Python 脚本
-def check(ctx):
-    for param in ctx['params']:
-        if param['isExternalInput']:
-            for part in param['parts']:
-                if part['kind'] == 'external_input' and part['crossFile']:
-                    return {"alert": True, "message": f"SQL注入: {part['name']} 跨文件来自 {part['callerMethod']}"}
+function check(ctx) {
+    for (const param of ctx.params) {
+        if (param.isExternalInput) {
+            // HIGH: Controller 注解确认的外部输入
+            return {alert: true, confidence: 'high', message: 'CONFIRMED injection'};
+        }
+        if (param.isTainted && !param.isExternalInput) {
+            // MEDIUM: 来源不确定，需人工核验
+            return {alert: true, confidence: 'medium', message: 'potential injection'};
+        }
+    }
+}
 ```
 
 ### 4.7 RuleEngine — 规则匹配与脚本执行
 
-**文件**: `src/rules/rule-engine.ts` (600 行)
+**文件**: `src/rules/rule-engine.ts` (~700 行)
 
 **架构**:
 
@@ -467,12 +514,38 @@ RuleEngine
   │   │   ├── sink: SinkInfo           // 危险函数签名
   │   │   ├── method: MethodInfo       // 所在方法信息
   │   │   ├── params: ParamSourceInfo[] // 每个参数的结构化来源
+  │   │   ├── receiverParams: ParamSourceInfo[] // receiver 构造参数来源
   │   │   ├── objHistory: ObjHistory[]  // 对象调用历史
   │   │   ├── retUsage: RetUsage[]     // 返回值后续使用
   │   │   └── taintChain: TaintChain?  // 跨文件污点链
   │   └── engine.execute(script, ctx) → CheckResult
   └── injectDependencies()             // 注入 tree-sitter + CodeGraph 依赖
 ```
+
+#### receiverParams — receiver 构造参数追踪（v0.2.1 新增）
+
+当 sink 是无参数方法（如 `ProcessBuilder.start()`），直接参数为空，但 receiver 变量的构造链可能含有 tainted 数据。
+
+`resolveReceiverParams()` 追踪链路：
+
+```
+processBuilder.start()                    ← sink, 无参数
+  │
+  └── 追踪 receiver "processBuilder" 的赋值来源:
+      ProcessBuilder processBuilder = UsProcessBuilderUtils.getProcessBuilder(commands)
+      │
+      └── 构造方法参数 "commands" → traceArgParts()
+          │
+          └── commands = Arrays.asList(cmdList.split(...))
+              │
+              └── cmdList → @RequestParam → external_input ✅
+  
+  receiverParams = [{ isExternalInput: true, parts: [external_input:cmdList] }]
+  → CONFIRMED command injection (CWE-78)
+  → confidence: HIGH
+```
+
+这样即使危险方法不是标准构造器（如 `UsProcessBuilderUtils.getProcessBuilder`），也能检测到 tainted 数据流入。
 
 **规则 YAML 格式**:
 
@@ -534,6 +607,7 @@ glob → regex:
       "confidence": "high"
     }
   ],
+  "receiverParams": [],
   "objHistory": [
     {"objectName": "stmt", "calls": [{"method": "executeQuery", "args": ["sql"]}]}
   ],
@@ -740,37 +814,46 @@ async analyze(): Promise<AnalysisResult> {
 
 ### 5.2 脚本检查逻辑概要
 
+#### 通用三级风险模型（所有规则统一）
+
+| 风险 | 条件 | 置信度 | 说明 |
+|---|---|---|---|
+| HIGH | `isExternalInput=true` 或有 taint chain | high | Controller 注解确认外部输入 |
+| MEDIUM | `isTainted=true` 且 `isExternalInput=false` | medium | 来源不确定，需人工核验 |
+| 不告警 | 全部 `kind==='hardcoded'` | — | 语法事实确认安全 |
+
+**JL-S003 (命令注入)**:
+- `ProcessBuilder.ProcessBuilder(*)` → 检查参数来源
+  - 参数含 `external_input` → CONFIRMED command injection (high)
+  - 参数含 `tainted` → potential command injection (medium)
+  - 全部 `hardcoded` → 不告警
+- `ProcessBuilder.start()` → 检查 `receiverParams`（构造链追踪）
+  - `receiverParams` 含 `external_input` → CONFIRMED (high)
+  - `receiverParams` 含 `tainted` → potential (medium)
+  - 无 tainted → 不告警
+- `Runtime.exec()` → 同 ProcessBuilder 构造器逻辑
+
 **JL-S001 (SQL 注入)**:
 - `createStatement()` → 始终告警（medium 置信度）
 - `executeQuery/execute/executeUpdate()` → 检查参数来源
-  - 参数含外部输入 + 硬编码 → 确认 SQL 注入（high）
-  - 仅硬编码 → 低风险（low）
+  - 参数含 `external_input` → 确认 SQL 注入（high）
+  - 参数含 `tainted` → 可能注入（medium）
+  - 全部 `hardcoded` → 不告警
   - PreparedStatement → 不告警
 
 **JL-S005 (路径穿越)**:
-- `FileInputStream/FileOutputStream/File/FileReader` 构造器 → 检查路径参数
-  - 路径含外部输入 + 跨文件 → 确认穿越（high）
-  - 路径含外部输入 → 可能穿越（medium/low）
+- 构造器参数检查：`external_input` → high，`tainted` → medium，`hardcoded` → 不告警
 
 **JL-S009 (硬编码密钥)**:
 - `SecretKeySpec/DESKeySpec` 构造器 → 检查密钥参数
   - 参数 `isHardcoded=true` 且有 `fieldName` → 硬编码字段常量（high）
   - 参数 `isHardcoded=true` → 硬编码字面量（high）
-  - 参数变量名匹配 `/secret|key|password|token|credential/i` → 可能硬编码（medium）
   - 其他 → 低置信度（low）
 
 **JL-S010 (弱加密)**:
-- `Cipher.getInstance(algo)` → 检查算法名
-  - DES → 告警（high）
-  - ECB → 告警（high）
-  - RC4/ARCFOUR → 告警（high）
-  - RSA 无 OAEP → 告警（high）
-  - 其他 → 低置信度（low）
-- `MessageDigest.getInstance(algo)` → 检查算法名
-  - MD5 → 告警（high）
-  - SHA-1 → 告警（high）
+- `Cipher.getInstance(algo)` / `MessageDigest.getInstance(algo)` → 检查算法名
+  - DES/ECB/RC4/ARCFOUR/RSA(无OAEP)/MD5/SHA-1 → high
   - SHA-256/384/512/3 → 不告警
-  - 其他 → 低置信度（low）
 
 ---
 
@@ -854,7 +937,87 @@ RuleEngine: "java.sql.PreparedStatement.executeQuery(*)" 匹配 JL-S001
 JS 脚本: fullClass === 'java.sql.PreparedStatement' → { alert: false }
 ```
 
-### 6.3 硬编码密钥检测（常量值求解）
+### 6.3 receiverParams 追踪 — 非标准构造器
+
+当 ProcessBuilder 通过非标准构造器创建时，`ProcessBuilder.start()` 本身无参数，
+但 `receiverParams` 追踪了 receiver 变量的赋值链：
+
+```java
+@RestController
+public class GtsGoodController {
+    @GetMapping(value = "/gtsGood001")
+    public String gtsGood001(@RequestParam(name = "cmdList") String cmdList) throws IOException {
+        List<String> commands = Arrays.asList(cmdList.split(CMD_SEPARATOR));
+        ProcessBuilder processBuilder = UsProcessBuilderUtils.getProcessBuilder(commands);
+        Process process = processBuilder.start();
+        return SUCCESS;
+    }
+}
+```
+
+```
+1. Deep Scanner 提取:
+   - Arrays.asList(cmdList.split(CMD_SEPARATOR))
+   - UsProcessBuilderUtils.getProcessBuilder(commands)
+   - processBuilder.start()
+
+2. RuleEngine 匹配:
+   - processBuilder.start() → "java.lang.ProcessBuilder.start()" 匹配 JL-S003
+   - params = [] （start() 无参数）
+
+3. resolveReceiverParams 追踪:
+   - sourceLine: "processBuilder.start()" → receiver = "processBuilder"
+   - 在方法体中查找: ProcessBuilder processBuilder = UsProcessBuilderUtils.getProcessBuilder(commands)
+   - 提取构造方法参数: "commands"
+   - traceArgParts("commands") → traceVariableParts → traceLocalVariableAssignment:
+     commands = Arrays.asList(cmdList.split(CMD_SEPARATOR))
+     → cmdList → isSpringHandlerClass() = true → kind: external_input
+
+4. receiverParams 结果:
+   [{ isExternalInput: true, isTainted: true, parts: [{kind:"external_input", name:"cmdList"}] }]
+
+5. command-injection.js 判断:
+   - receiverParams[0].isExternalInput === true
+   - → CONFIRMED command injection risk (CWE-78)
+   - confidence: high
+   - message: "Constructor receives external input: cmdList"
+```
+
+### 6.4 三级风险模型对比
+
+```java
+@RestController
+public class ExampleController {
+    // HIGH: @RestController + @RequestParam → external_input
+    @GetMapping("/bad")
+    public String bad(@RequestParam String cmdList) {
+        ProcessBuilder pb = new ProcessBuilder(cmdList.split(" "));
+        return "ok";
+    }
+
+    // MEDIUM: @RestController + COMMAND_WHITELIST.get(index) → tainted
+    @GetMapping("/good")
+    public String good(@RequestParam int index) {
+        String command = COMMAND_C + COMMAND_WHITELIST.get(index);
+        ProcessBuilder pb = new ProcessBuilder(command.split(" "));
+        return "ok";
+    }
+}
+```
+
+```
+bad001: cmdList → @RequestParam → external_input → HIGH
+  params: [{ isExternalInput: true, parts: [{kind:"external_input", name:"cmdList"}] }]
+  → ProcessBuilder with external input — CONFIRMED command injection risk (CWE-78)
+
+good001: COMMAND_WHITELIST.get(index) → 无法确认内容安全 → tainted
+  params: [{ isHardcoded: true, isTainted: true,
+             parts: [{kind:"hardcoded", value:"cmd.exe /c "}, {kind:"tainted", name:"COMMAND_WHITELIST"}] }]
+  → ProcessBuilder with unresolved parameter source — potential command injection risk (CWE-78)
+  → 需人工核验白名单内容是否安全
+```
+
+### 6.5 硬编码密钥检测（常量值求解）
 
 ```java
 // DataUtils.java:82-83
@@ -921,31 +1084,28 @@ javalint graph [path] [options]
 
 **Demo 项目** (`demo-java-project/`): 7 个 Java 文件，30 个已知漏洞
 
-| 规则 | 告警数 | 检出漏洞 | 误报 |
-|---|---|---|---|
-| JL-S001 SQL注入 | 11 | 6 | 0 |
-| JL-S002 反序列化 | 2 | 2 | 0 |
-| JL-S003 命令注入 | 2 | 1 | 1 (ProcessBuilder硬编码) |
-| JL-S005 路径穿越 | 5 | 2 | 2 (readFileSafe) |
-| JL-S006 SSRF | 2 | 2 | 0 |
-| JL-S007 XXE | 4 | 2 | 2 (parseXmlSafe) |
-| JL-S008 XPath/LDAP/JNDI | 4 | 3 | 1 (ldapAuthSafe) |
-| JL-S009 硬编码密钥 | 3 | 2 | 0 |
-| JL-S010 弱加密 | 5 | 4 | 0 (SHA-256已放行) |
-| JL-S011 不安全反射 | 2 | 1 | 1 (newInstance) |
-| JL-S012 不安全随机 | 2 | 1 | 0 |
-| JL-S013 日志注入 | 1 | 1 | 0 |
-| **合计** | **46** | **27** | **7** |
-
-**检测覆盖率**: 27/29 = **93%**
-**误报率**: 7/46 = 15%
-
-**漏检项（2个）**:
-
-| 漏洞 | 原因 | 解决思路 |
+| 规则 | 告警数 | 说明 |
 |---|---|---|
-| `DB_PASSWORD` 硬编码字段 | 没有被任何代码引用，不在调用图中 | 增加字段声明扫描，即使无引用也检测 |
-| `String.replace` 模板注入 | 不是标准模板引擎，`String.replace` 太常见不适合做 sink | 需要更复杂的模板注入检测策略 |
+| JL-S001 SQL注入 | ~11 | createStatement + executeQuery 全检测 |
+| JL-S002 反序列化 | 2 | ObjectInputStream.readObject |
+| JL-S003 命令注入 | ~3 | ProcessBuilder 构造器 + start() receiverParams |
+| JL-S004 跨文件污点 | ~3 | CodeGraph BFS 追踪 |
+| JL-S005 路径穿越 | ~5 | FileInputStream/File 构造器 |
+| JL-S006 SSRF | 2 | URL/HttpClient 构造器 |
+| JL-S007 XXE | ~4 | DocumentBuilder/SchemaFactory |
+| JL-S008 XPath/LDAP/JNDI | ~4 | xpath/ldap/jndi 组合检测 |
+| JL-S009 硬编码密钥 | 3 | static final String 常量求解 |
+| JL-S010 弱加密 | 5 | Cipher/MessageDigest 算法检测 |
+| JL-S011 不安全反射 | 2 | Class.forName + newInstance |
+| JL-S012 不安全随机 | 2 | java.util.Random |
+| JL-S013 日志注入 | 1 | logger.info + 用户输入 |
+| **合计** | **~44** | |
+
+**关键改进（v0.2.1）**:
+- 纯静态分析：删除变量名语义猜测（EXTERNAL_INPUT_PATTERNS、safeListPatterns）
+- 三级风险模型：external_input(HIGH) / tainted(MEDIUM) / hardcoded(不告警)
+- receiverParams：ProcessBuilder.start() 检测构造链中的 tainted 数据
+- 注释行跳过：修复注释中示例代码干扰参数追踪的问题
 
 ---
 
@@ -972,14 +1132,14 @@ javalint graph [path] [options]
 
 | 限制 | 影响 | 原因 |
 |---|---|---|
-| 污点源依赖参数名模式匹配 | 可能漏检使用非常规参数名的污点源 | 无法做真正的数据流分析 |
+| 污点源只依赖 Controller 注解 | 无注解的方法参数一律标为 tainted | 纯静态分析不猜测语义 |
 | 无消毒器检测 | 无法识别已经过输入净化的路径为安全 | 不追踪 `sanitize()`、参数化查询等消毒操作 |
 | static final String 需要被引用才检测 | 未使用的硬编码常量漏检 | DeepCallScanner 不扫描字段声明 |
+| 注释行干扰参数追踪 | 已修复：跳过 `//`/`*`/`/*` 开头的行 | `traceLocalVariableAssignment` |
+| receiver 参数追踪 | ProcessBuilder.start() 等无参数方法能检测构造链 | 已实现 `resolveReceiverParams` |
 | 协变返回类型 | `StringBuilder.append()` 返回 `Appendable` 而非 `StringBuilder` | javap 输出声明类型而非实际类型 |
 | 泛型类型擦除 | `Optional.get()` 返回 `T`，解析为 null | 类型擦除后无法知道具体 T |
 | CodeGraph 无 unresolved_refs | 外部依赖调用全部丢失 | CodeGraph 设计时只关注项目内部 |
-| Spring 注解识别 | `@RequestParam` 等注解目前不识别 | 需要 tree-sitter 注解解析 |
-| 误报: 安全模式仍告警 | `readFileSafe`/`parseXmlSafe`/`ldapAuthSafe` 有安全措施但仍告警 | 缺少消毒器/安全模式识别 |
 
 ### 后续规划
 
@@ -987,9 +1147,9 @@ javalint graph [path] [options]
 |---|---|---|
 | P0 | 字段声明扫描 | 即使无引用也检测 `static final String XXX = "password"` |
 | P0 | 消毒器识别 | 检测 `replaceAll`/`PreparedStatement`/`setFeature` 等安全模式，降低或消除误报 |
-| P0 | Spring 注解支持 | `@RequestParam`/`@PathVariable`/`@RequestBody` 自动标记为外部输入 |
+| P0 | 其他 sink 规则添加 | XXE/SSRF/XPath/LDAP 规则的参数检查也改为三级模型 |
 | P1 | SARIF 输出 | VS Code/GitHub 集成 |
-| P1 | 增量分析 | 只分析 git 变更文件 |
+| P1 | 增量分析 | 只分析 git 变变文件 |
 | P1 | `@SuppressWarnings("JL-S001")` | 注解抑制告警 |
 | P2 | 跨文件字段类型追踪 | 利用 CodeGraph `contains`/`type_of` 边 |
 | P2 | 协变返回类型覆盖 | 硬编码 `StringBuilder.append` → `StringBuilder` |
@@ -1024,9 +1184,54 @@ javalint graph [path] [options]
 
 tree-sitter 的 `resource` 节点没有标准化的子字段名，不同版本可能是 `name` 或 `value`。使用正则提取声明更可靠。
 
-### 11.5 pi-tui CJK 宽度溢出崩溃
+### 11.6 tainted 截断问题
 
-pi-coding-agent 输出含中文字符时，pi-tui 的 `visibleWidth()` 计算可能比终端宽度多 1 列，`doRender()` 中 `throw new Error()` 直接崩溃退出。修复: 将 throw 改为防御性截断 `sliceByColumn()`。
+**现象**: 普通方法参数被标记为 `tainted`(MEDIUM)，但调用者如果是 Controller，被调用方法的参数实际上是外部输入。
+
+**原因**: JavaLint 只分析当前方法内部，不做过程间分析（IPA）。当 Controller 调用 Service 传参时，
+Service 方法参数的来源在 Service 内部无法确认 → 标记为 `tainted`。
+
+**影响**: 命中 `tainted` → MEDIUM 告警，而非 HIGH。人工核验时可判断为真实漏洞。
+
+**解决**: 需要过程间分析（IPA），将调用者参数的 tainted 状态传递到被调用方法。
+
+### 11.7 注释行干扰参数追踪
+
+**现象**: `cmdList` 被解析为 `hardcoded:"aaa"` 而非 `external_input`。
+
+**原因**: `traceLocalVariableAssignment` 不跳过注释行，导致注释中的变量赋值（如 `// String a = "aaa"`）被当成有效代码解析。
+
+**修复**: 遍历赋值行时跳过以 `//`/`*`/`/*` 开头的行。
+
+### 11.8 变量名语义猜测的陷阱
+
+**现象**: `COMMAND_WHITELIST.get(index)` 被标记为 `hardcoded`/`whitelist` → good001 不告警。
+
+**原因**: 变量名 `COMMAND_WHITELIST` 匹配 `/WHITELIST/i` 模式，被误判为安全值。但从纯静态角度，白名单内容无法确认。
+
+**决定**: 删除所有基于变量名的语义猜测（`EXTERNAL_INPUT_PATTERNS` 和 `safeListPatterns`），只保留语法事实判断。
+
+- ✅ 语法事实: `@RestController` 注解 → 方法参数来自 HTTP 请求
+- ✅ 语法事实: `static final String X = "hello"` → 硬编码常量
+- ❌ 语义猜测: 变量名 `userInput` → 外部输入
+- ❌ 语义猜测: 变量名 `COMMAND_WHITELIST` → 安全值
+
+### 11.9 receiver 参数追踪
+
+**现象**: `UsProcessBuilderUtils.getProcessBuilder(commands)` 不会触发 JL-S003，`processBuilder.start()` 也无参数 → 不告警。
+
+**原因**: 规则只匹配已知 FQN 签名。`UsProcessBuilderUtils` 不是 JDK 类，不在 YAML signaturePatterns 中。
+
+**解决**: ScriptContext 新增 `receiverParams` 字段。对于 `processBuilder.start()`，追踪 `processBuilder` 的赋值来源 → 解析构造参数的 tainted 状态。
+
+\`\`\`
+processBuilder.start() → receiverParams 追踪:
+  processBuilder = UsProcessBuilderUtils.getProcessBuilder(commands)
+  → 构造参数 commands → cmdList (external_input)
+  → receiverParams = [{ isExternalInput: true, parts: [external_input:cmdList] }]
+  → CONFIRMED command injection (CWE-78)
+\`\`\`
+
 ---
 
 ## 12. 使用指南
