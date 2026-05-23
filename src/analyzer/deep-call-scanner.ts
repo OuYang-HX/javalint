@@ -74,21 +74,80 @@ export class DeepCallScanner {
   }
 
   private findJavaGrammarWasm(): string {
-    const candidates = [
-      // 1. 相对于当前文件（dist/analyzer/ → node_modules/）— 通用路径，优先
-      path.join(__dirname, '..', '..', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
-      // 2. npm 全局安装路径
-      path.join(process.env.HOME || '/root', '.npm-global', 'lib', 'node_modules', '@colbymchenry', 'codegraph', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
-      // 3. 本地开发路径（开发时使用）
-      path.join(process.env.HOME || '/root', 'github', 'codegraph', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
+    // 使用 require.resolve 动态查找 — 跟 codegraph 的 npm-shim 同样策略
+    // tree-sitter-wasms 是 @colbymchenry/codegraph 的子依赖，
+    // 在不同安装方式下位置不同:
+    //   npm install (项目本地) → node_modules/@colbymchenry/codegraph-<platform>/node_modules/tree-sitter-wasms/
+    //   npm install -g (全局)   → 全局 node_modules/ 同上
+    //   npm link (开发)         → 可能扁平化到顶层 node_modules/
+    const searchStrategies = [
+      // 策略1: require.resolve — 最可靠，跟随 Node 模块解析算法
+      () => {
+        try {
+          const pkgPath = require.resolve('tree-sitter-wasms/package.json');
+          return path.join(path.dirname(pkgPath), 'out', 'tree-sitter-java.wasm');
+        } catch { /* not resolvable */ }
+        return null;
+      },
+      // 策略2: 通过 codegraph 平台包间接定位
+      () => {
+        const target = `${process.platform}-${process.arch}`;
+        try {
+          const pkgPath = require.resolve(`@colbymchenry/codegraph-${target}/package.json`);
+          return path.join(path.dirname(pkgPath), 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm');
+        } catch { /* platform package not installed */ }
+        return null;
+      },
+      // 策略3: 相对于当前文件的常见路径
+      () => {
+        const candidates = [
+          path.join(__dirname, '..', '..', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
+          path.join(__dirname, '..', '..', 'node_modules', '@colbymchenry', 'codegraph', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
+        ];
+        for (const c of candidates) {
+          if (fs.existsSync(c)) return c;
+        }
+        return null;
+      },
+      // 策略4: Windows 全局 npm 路径
+      () => {
+        if (process.platform === 'win32') {
+          const appData = process.env.APPDATA;
+          if (appData) {
+            const candidates = [
+              path.join(appData, 'npm', 'node_modules', '@colbymchenry', 'codegraph', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
+              path.join(appData, 'npm', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
+            ];
+            for (const c of candidates) {
+              if (fs.existsSync(c)) return c;
+            }
+          }
+        }
+        return null;
+      },
+      // 策略5: Unix 全局 npm 路径
+      () => {
+        const candidates = [
+          path.join(process.env.HOME || '/root', '.npm-global', 'lib', 'node_modules', '@colbymchenry', 'codegraph', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
+          path.join('/usr', 'local', 'lib', 'node_modules', '@colbymchenry', 'codegraph', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
+        ];
+        for (const c of candidates) {
+          if (fs.existsSync(c)) return c;
+        }
+        return null;
+      },
     ];
-    for (const c of candidates) {
-      if (fs.existsSync(c)) return c;
+
+    for (const strategy of searchStrategies) {
+      const result = strategy();
+      if (result && fs.existsSync(result)) return result;
     }
+
     throw new Error(
-      'Cannot find tree-sitter-java.wasm. ' +
-      'Ensure @colbymchenry/codegraph is installed (npm install).\n' +
-      'Searched: ' + candidates.join('\n         ')
+      'Cannot find tree-sitter-java.wasm.\n' +
+      'This file is provided by @colbymchenry/codegraph.\n' +
+      'Fix: npm install @colbymchenry/codegraph (or npm install -g @colbymchenry/codegraph)\n' +
+      'Then run: npm run build'
     );
   }
 
