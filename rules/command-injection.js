@@ -4,11 +4,18 @@
  * 参数来源三级风险模型:
  *   - external_input (Controller 方法参数) → HIGH — 明确攻击面，确认注入
  *   - tainted (普通方法参数/未溯源变量)     → MEDIUM — 潜在污点，溯源截断在普通函数
- *   - hardcoded (字面量/白名单/static final) → 不告警 或 LOW
+ *   - hardcoded/whitelist (字面量/白名单/static final) → 不告警
  *
  * isTainted = isExternalInput || kind==='tainted'
  *   → 脚本用 isExternalInput 区分 high/medium
+ *
+ * kind: 'hardcoded' = 字面量硬编码; 'whitelist' = 白名单校验后的安全值
+ *   → 两者都视为安全，不告警
  */
+
+function isSafePart(part) {
+  return part.kind === 'hardcoded' || part.kind === 'whitelist';
+}
 
 module.exports.check = function(ctx) {
   const sink = ctx.sink;
@@ -42,10 +49,10 @@ module.exports.check = function(ctx) {
     }
 
     if (hasHardcoded) {
-      const allHardcoded = params.every(p =>
-        p.isHardcoded && (p.parts || []).every(part => part.kind === 'hardcoded')
+      const allSafe = params.every(p =>
+        p.isHardcoded && (p.parts || []).every(isSafePart)
       );
-      if (allHardcoded) {
+      if (allSafe) {
         return { alert: false };
       }
       return { alert: true, message: 'Runtime.exec() with hardcoded command — low injection risk (CWE-78)', confidence: 'low' };
@@ -93,15 +100,15 @@ module.exports.check = function(ctx) {
       return { alert: true, message: msg, confidence: 'medium' };
     }
 
-    // LOW/不告警: 全部硬编码
+    // 不告警: 全部硬编码或白名单
     if (hasHardcoded) {
-      const allPartsHardcoded = params.every(p =>
-        p.isHardcoded && (p.parts || []).every(part => part.kind === 'hardcoded')
+      const allSafe = params.every(p =>
+        p.isHardcoded && (p.parts || []).every(isSafePart)
       );
-      if (allPartsHardcoded) {
+      if (allSafe) {
         return { alert: false };
       }
-      // 部分 hardcode + 部分 other → low
+      // 部分 safe + 部分 other → low
       return { alert: true, message: 'ProcessBuilder with hardcoded commands — low injection risk (CWE-78)', confidence: 'low' };
     }
 

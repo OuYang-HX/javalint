@@ -152,7 +152,7 @@ export interface ParamSourceInfo {
  */
 export interface ParamPart {
   /** 此部分的来源类别 */
-  kind: 'hardcoded' | 'external_input' | 'tainted' | 'method_return' | 'field' | 'variable' | 'unknown';
+  kind: 'hardcoded' | 'whitelist' | 'external_input' | 'tainted' | 'method_return' | 'field' | 'variable' | 'unknown';
 
   // ── hardcoded ──
   /** 硬编码的具体值 */

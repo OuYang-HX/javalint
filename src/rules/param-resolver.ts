@@ -119,7 +119,7 @@ export class ParamResolver {
     type: string,
     parts: ParamPart[],
   ): ParamSourceInfo {
-    const isHardcoded = parts.some(p => p.kind === 'hardcoded');
+    const isHardcoded = parts.some(p => p.kind === 'hardcoded' || p.kind === 'whitelist');
     const isExternalInput = parts.some(p => p.kind === 'external_input');
     const isTainted = parts.some(p => p.kind === 'external_input' || p.kind === 'tainted');
     const isResolvable = parts.every(p => p.kind !== 'unknown');
@@ -481,7 +481,7 @@ export class ParamResolver {
       ];
       if (method === 'get' && safeListPatterns.some(p => p.test(receiver))) {
         return [{
-          kind: 'hardcoded',
+          kind: 'whitelist',
           value: `${receiver}.get(index)`,
           methodSignature: `${receiver}.get(index)`,
         }];
