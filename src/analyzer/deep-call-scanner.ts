@@ -74,14 +74,13 @@ export class DeepCallScanner {
   }
 
   private findJavaGrammarWasm(): string {
-    // 使用 require.resolve 动态查找 — 跟 codegraph 的 npm-shim 同样策略
-    // tree-sitter-wasms 是 @colbymchenry/codegraph 的子依赖，
-    // 在不同安装方式下位置不同:
-    //   npm install (项目本地) → node_modules/@colbymchenry/codegraph-<platform>/node_modules/tree-sitter-wasms/
-    //   npm install -g (全局)   → 全局 node_modules/ 同上
-    //   npm link (开发)         → 可能扁平化到顶层 node_modules/
+    // 策略1（优先）: 内嵌 WASM — 随项目分发，不依赖外部包
+    const bundled = path.join(__dirname, 'tree-sitter-java.wasm');
+    if (fs.existsSync(bundled)) return bundled;
+
+    // 策略2-6: 从外部依赖查找（备选）
     const searchStrategies = [
-      // 策略1: require.resolve — 最可靠，跟随 Node 模块解析算法
+      // require.resolve — 跟随 Node 模块解析算法
       () => {
         try {
           const pkgPath = require.resolve('tree-sitter-wasms/package.json');
@@ -89,7 +88,7 @@ export class DeepCallScanner {
         } catch { /* not resolvable */ }
         return null;
       },
-      // 策略2: 通过 codegraph 平台包间接定位
+      // 通过 codegraph 平台包间接定位
       () => {
         const target = `${process.platform}-${process.arch}`;
         try {
@@ -98,7 +97,7 @@ export class DeepCallScanner {
         } catch { /* platform package not installed */ }
         return null;
       },
-      // 策略3: 相对于当前文件的常见路径
+      // 相对路径常见位置
       () => {
         const candidates = [
           path.join(__dirname, '..', '..', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
@@ -109,7 +108,7 @@ export class DeepCallScanner {
         }
         return null;
       },
-      // 策略4: Windows 全局 npm 路径
+      // Windows 全局 npm 路径
       () => {
         if (process.platform === 'win32') {
           const appData = process.env.APPDATA;
@@ -125,7 +124,7 @@ export class DeepCallScanner {
         }
         return null;
       },
-      // 策略5: Unix 全局 npm 路径
+      // Unix 全局 npm 路径
       () => {
         const candidates = [
           path.join(process.env.HOME || '/root', '.npm-global', 'lib', 'node_modules', '@colbymchenry', 'codegraph', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
@@ -145,9 +144,9 @@ export class DeepCallScanner {
 
     throw new Error(
       'Cannot find tree-sitter-java.wasm.\n' +
-      'This file is provided by @colbymchenry/codegraph.\n' +
-      'Fix: npm install @colbymchenry/codegraph (or npm install -g @colbymchenry/codegraph)\n' +
-      'Then run: npm run build'
+      'The bundled WASM file is missing from src/analyzer/.\n' +
+      'Try: git checkout src/analyzer/tree-sitter-java.wasm\n' +
+      'Or: npm install @colbymchenry/codegraph'
     );
   }
 
