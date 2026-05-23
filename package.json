@@ -7,7 +7,7 @@
     "javalint": "./dist/bin/javalint.js"
   },
   "scripts": {
-    "build": "tsc && cp src/analyzer/jdk-api-index.json src/analyzer/jdk-api-index.db dist/analyzer/",
+    "build": "tsc && node -e \"const fs=require('fs');const p=require('path');const d='dist/analyzer';fs.mkdirSync(d,{recursive:true});['jdk-api-index.json','jdk-api-index.db'].forEach(f=>{const s=p.join('src/analyzer',f);if(fs.existsSync(s))fs.copyFileSync(s,p.join(d,f))})\"",
     "dev": "tsc --watch",
     "cli": "npm run build && node dist/bin/javalint.js",
     "test": "node dist/bin/javalint.js analyze"
