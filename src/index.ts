@@ -165,6 +165,15 @@ export class JavaLint {
 
     console.log(`  Found ${alerts.length} alerts from rule matching`);
 
+    // 调试: 如果0告警, 显示前几个call site的签名和匹配结果
+    if (alerts.length === 0 && mergedSites.length > 0) {
+      console.log('  ⚠️  No alerts — showing first 5 call site signatures:');
+      for (const site of mergedSites.slice(0, 5)) {
+        const matched = this.ruleEngine.matchRules(site);
+        console.log(`    ${site.fullSignature.fullQualifiedName} → matched: ${matched.map(r => r.id).join(',') || 'NONE'}`);
+      }
+    }
+
     // ── Layer 4: Cross-file taint analysis ──────────────────────────
     let taintStats = { sourcesFound: 0, chainsFound: 0, methodsAnalyzed: 0 };
 

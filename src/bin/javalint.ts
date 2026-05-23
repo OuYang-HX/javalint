@@ -61,7 +61,7 @@ program
       root = target;
     }
 
-    console.log(`\n🛡️  JavaLint - Java Static Code Analysis`);
+    console.log(`\n🛡️  JavaLint v0.2.1 - Java Static Code Analysis`);
     console.log(`   ${isFile ? 'File' : 'Project'}: ${target}`);
 
     const lint = new JavaLint(root, options?.rules, isFile ? target : undefined);

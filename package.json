@@ -1,6 +1,6 @@
 {
   "name": "javalint",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Java static code analysis powered by CodeGraph",
   "main": "dist/index.js",
   "bin": {
