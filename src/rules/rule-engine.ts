@@ -20,7 +20,7 @@ import { CallSite, Rule, CheckResult, Alert } from '../types';
 import {
   ScriptContext, ScriptCheckResult,
   SinkInfo, MethodInfo, MethodParameter,
-  ParamSourceInfo,
+  ParamSourceInfo, ParamPart,
   ObjectHistoryInfo, ObjectCallRecord,
   ReturnUsageInfo, ReturnCallRecord,
   TaintChainContext,
@@ -40,6 +40,7 @@ export class RuleEngine {
   private paramResolver: ParamResolver | null = null;
   private cgTraverser: CodeGraphTraverser | null = null;
   private scanResults: DeepCallResult[] = [];
+  private projectRoot: string = '';
 
   constructor(rulesDir: string) {
     this.rulesDir = rulesDir;
@@ -60,6 +61,7 @@ export class RuleEngine {
   ): void {
     this.paramResolver = new ParamResolver(deepScanner, cgTraverser, projectRoot);
     this.cgTraverser = cgTraverser;
+    this.projectRoot = projectRoot;
   }
 
   /** 注入扫描结果（供参数解析使用） */
@@ -216,7 +218,108 @@ export class RuleEngine {
       sourceReason: callSite.taintChain.sourceReason,
     } : null;
 
-    return { sink, method, params, objHistory, retUsage, taintChain };
+    // 追踪 receiver 变量的构造参数
+    // 例如: processBuilder.start() → processBuilder 的赋值来源
+    const receiverParams = this.resolveReceiverParams(callSite);
+
+    return { sink, method, params, receiverParams, objHistory, retUsage, taintChain };
+  }
+
+  /**
+   * 追踪 receiver 变量的构造参数来源
+   * 例如: processBuilder.start() → 找到 processBuilder = new ProcessBuilder(commands)
+   *       → 返回 commands 的参数追踪结果
+   */
+  private resolveReceiverParams(callSite: CallSite): ParamSourceInfo[] {
+    if (!this.paramResolver) return [];
+
+    const sourceLine = callSite.fullSignature.sourceLine || '';
+    const objMatch = sourceLine.match(/(\w+)\.\w+\s*\(/);
+    if (!objMatch) return [];
+
+    const receiverVar = objMatch[1]!;
+
+    // 在同方法中查找 receiver 变量的赋值来源
+    // ProcessBuilder processBuilder = new ProcessBuilder(commands)
+    // ProcessBuilder processBuilder = UsProcessBuilderUtils.getProcessBuilder(commands)
+    const fullPath = path.join(this.projectRoot || '', callSite.callerFile);
+    if (!fs.existsSync(fullPath)) return [];
+
+    const fileContent = fs.readFileSync(fullPath, 'utf-8');
+    const lines = fileContent.split('\n');
+
+    // 找方法范围
+    let methodStart = -1;
+    let methodEnd = lines.length;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      if (line.includes(callSite.callerMethod) &&
+          (line.includes('public') || line.includes('private') || line.includes('protected'))) {
+        methodStart = i;
+      }
+    }
+
+    if (methodStart >= 0) {
+      let depth = 0;
+      let foundOpen = false;
+      for (let i = methodStart; i < lines.length; i++) {
+        for (const ch of lines[i]!) {
+          if (ch === '{') { depth++; foundOpen = true; }
+          if (ch === '}') depth--;
+          if (foundOpen && depth === 0) { methodEnd = i + 1; break; }
+        }
+        if (foundOpen && depth === 0) break;
+      }
+    }
+
+    // 查找 receiver 的赋值行
+    // 匹配: Type receiverVar = xxx 或 var receiverVar = xxx
+    const assignRegex = new RegExp(
+      `(?:final\\s+)?(?:\\w+(?:<[^>]+>)?)\\s+${this.escapeRegex(receiverVar)}\\s*=`
+    );
+
+    for (let i = methodStart; i < methodEnd && i < lines.length; i++) {
+      const rawLine = lines[i]!.trim();
+      if (!rawLine || rawLine.startsWith('//') || rawLine.startsWith('*') || rawLine.startsWith('/*')) continue;
+
+      const assignMatch = rawLine.match(assignRegex);
+      if (!assignMatch) continue;
+
+      // 提取 RHS
+      const eqIdx = rawLine.indexOf('=');
+      if (eqIdx < 0) continue;
+
+      let rhs = rawLine.substring(eqIdx + 1).trim().replace(/;\s*$/, '');
+
+      // new ProcessBuilder(commands) → 参数是 commands
+      // UsProcessBuilderUtils.getProcessBuilder(commands) → 参数是 commands
+      // 提取最内层括号的参数
+      const callMatch = rhs.match(/\(([^)]+)\)\s*$/);
+      if (callMatch && callMatch[1]) {
+        const args = callMatch[1];
+        // 用 ParamResolver 解析这些参数的来源
+        const argParts = this.paramResolver.traceArgParts(args, callSite, this.scanResults || []);
+        if (argParts.length > 0) {
+          return [{
+            position: 0,
+            type: 'unknown',
+            isHardcoded: argParts.every(p => p.kind === 'hardcoded'),
+            isExternalInput: argParts.some(p => p.kind === 'external_input'),
+            isTainted: argParts.some(p => p.kind === 'external_input' || p.kind === 'tainted'),
+            isResolvable: argParts.every(p => p.kind !== 'unknown'),
+            composite: argParts.length > 1 ? 'concat' : 'direct',
+            parts: argParts,
+            confidence: argParts.some(p => p.kind === 'external_input') ? 'high' : 'medium',
+          }];
+        }
+      }
+    }
+
+    return [];
+  }
+
+  private escapeRegex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   // ─── SinkInfo 构建 ──────────────────────────────────────────────────

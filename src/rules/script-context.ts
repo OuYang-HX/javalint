@@ -278,6 +278,8 @@ export interface ScriptContext {
   method: MethodInfo;
   /** 危险函数每个参数的来源追踪（结构化） */
   params: ParamSourceInfo[];
+  /** receiver 变量的构造参数来源追踪（如 processBuilder = new ProcessBuilder(commands)） */
+  receiverParams: ParamSourceInfo[];
   /** 危险函数对象的调用历史 */
   objHistory: ObjectHistoryInfo | null;
   /** 危险函数返回值的后续使用 */

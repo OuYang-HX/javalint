@@ -217,7 +217,7 @@ export class ParamResolver {
   // 核心：追踪参数来源 → 返回 ParamPart[]
   // ══════════════════════════════════════════════════════════════════
 
-  private traceArgParts(
+  traceArgParts(
     argText: string,
     callSite: CallSite,
     scanResults: DeepCallResult[],
