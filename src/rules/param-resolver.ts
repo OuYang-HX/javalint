@@ -425,14 +425,17 @@ export class ParamResolver {
       const assignRegex = new RegExp('(?:final\\s+)?(?:String|int|long|boolean|Object|List(?:<[^>]+>)?|Map(?:<[^>]+>)?|Set(?:<[^>]+>)?|Collection(?:<[^>]+>)?|Iterable(?:<[^>]+>)?|var)\\s+' + this.escapeRegex(varName) + '\\s*=');
 
     for (let i = methodStart; i < methodEnd && i < lines.length; i++) {
-      const line = lines[i]!.trim();
-      const assignMatch = line.match(assignRegex);
+      const rawLine = lines[i]!.trim();
+      // 跳过注释行和空行
+      if (!rawLine || rawLine.startsWith('//') || rawLine.startsWith('*') || rawLine.startsWith('/*')) continue;
+
+      const assignMatch = rawLine.match(assignRegex);
       if (!assignMatch) continue;
 
-      const eqIdx = line.indexOf('=');
+      const eqIdx = rawLine.indexOf('=');
       if (eqIdx < 0) continue;
 
-      let rhs = line.substring(eqIdx + 1).trim().replace(/;\s*$/, '');
+      let rhs = rawLine.substring(eqIdx + 1).trim().replace(/;\s*$/, '');
 
       // 字符串拼接：递归追踪每个 part
       if (rhs.includes('+')) {
