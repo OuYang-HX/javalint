@@ -234,7 +234,7 @@ export class ParamResolver {
         } else if (/^[a-zA-Z_]\w*$/.test(part.trim())) {
           parts.push(...this.traceVariableParts(part.trim(), callSite, scanResults));
         } else if (part.includes('(') && part.includes('.')) {
-          parts.push(this.traceMethodCallPart(part, callSite));
+          parts.push(...this.traceMethodCallPart(part, callSite, scanResults));
         } else if (part.includes('.')) {
           parts.push(this.traceFieldPart(part, callSite));
         } else {
@@ -251,7 +251,7 @@ export class ParamResolver {
 
     // 4. 方法调用返回值
     if (argText.includes('(') && argText.includes('.')) {
-      return [this.traceMethodCallPart(argText, callSite)];
+      return this.traceMethodCallPart(argText, callSite, scanResults);
     }
 
     // 5. 字段访问
@@ -292,10 +292,34 @@ export class ParamResolver {
         return [part];
       }
       // 非外部输入的方法参数，只作为普通变量
+      // 但如果是 Spring Controller 类，所有方法参数都视为外部输入
+      const isControllerClass = callSite.callerClass?.endsWith('Controller') ||
+                                callSite.callerClass?.endsWith('Controller');
+      if (isControllerClass) {
+        const crossFile = this.findCrossFileSource(callSite);
+        const part: ParamPart = {
+          kind: 'external_input',
+          source: 'method_parameter',
+          name: varName,
+          type: methodParam.type,
+          crossFile: !!crossFile,
+        };
+        if (crossFile) {
+          part.callerMethod = crossFile.qualifiedName;
+          part.callerFile = crossFile.filePath;
+        }
+        return [part];
+      }
       return [{ kind: 'variable', varName, type: methodParam.type }];
     }
 
-    // Step 2: 是否是局部变量赋值？
+    // Step 2: 是否是 static final String 常量？
+    const constantValue = this.getStaticFinalStringValue(varName, callSite.callerClass);
+    if (constantValue !== undefined) {
+      return [{ kind: 'hardcoded', value: constantValue, fieldName: varName }];
+    }
+
+    // Step 3: 是否是局部变量赋值？
     const localParts = this.traceLocalVariableAssignment(varName, callSite, scanResults);
     if (localParts) return localParts;
 
@@ -382,7 +406,7 @@ export class ParamResolver {
       }
     }
 
-      const assignRegex = new RegExp('(?:final\\s+)?(?:String|int|long|boolean|Object|List|Map|Set|var)\\s+' + this.escapeRegex(varName) + '\\s*=');
+      const assignRegex = new RegExp('(?:final\\s+)?(?:String|int|long|boolean|Object|List(?:<[^>]+>)?|Map(?:<[^>]+>)?|Set(?:<[^>]+>)?|Collection(?:<[^>]+>)?|Iterable(?:<[^>]+>)?|var)\\s+' + this.escapeRegex(varName) + '\\s*=');
 
     for (let i = methodStart; i < methodEnd && i < lines.length; i++) {
       const line = lines[i]!.trim();
@@ -401,7 +425,7 @@ export class ParamResolver {
 
       // 方法调用返回值
       if (rhs.includes('(') && rhs.includes('.')) {
-        return [this.traceMethodCallPart(rhs, callSite)];
+        return this.traceMethodCallPart(rhs, callSite, scanResults);
       }
 
       // 简单变量赋值
@@ -419,31 +443,101 @@ export class ParamResolver {
   }
 
   // ══════════════════════════════════════════════════════════════════
-  // 方法调用 / 字段追踪
+  // 方法调用 / 字段追踪 — 支持递归追踪 receiver 变量来源
   // ══════════════════════════════════════════════════════════════════
 
-  private traceMethodCallPart(text: string, callSite: CallSite): ParamPart {
+  private traceMethodCallPart(text: string, callSite: CallSite, scanResults?: DeepCallResult[]): ParamPart[] {
+    // 嵌套方法调用: method1(method2(...)) → 先解析最外层
+    // 例如: command.split(CMD_SEPARATOR) → receiver=command, method=split
     const methodMatch = text.match(/(\w+)\.(\w+)\s*\(/);
     if (methodMatch) {
       const receiver = methodMatch[1]!;
       const method = methodMatch[2]!;
 
+      // ── 特殊方法: 白名单/安全模式识别 ──
+      // List.get(index) → receiver 是白名单/配置列表时，返回值是安全的
+      const safeListPatterns = [
+        /WHITELIST/i, /ALLOWED/i, /SAFE_LIST/i, /PERMITTED/i,
+        /VALID_COMMANDS/i, /TRUSTED/i, /APPROVED/i,
+      ];
+      if (method === 'get' && safeListPatterns.some(p => p.test(receiver))) {
+        return [{
+          kind: 'hardcoded',
+          value: `${receiver}.get(index)`,
+          methodSignature: `${receiver}.get(index)`,
+        }];
+      }
+
+      // ── 静态 passthrough 方法: Arrays.asList / Collections.unmodifiableList 等 ──
+      // 这些方法不改变数据来源，返回值的来源 = 参数的来源
+      const staticPassthrough = ['asList', 'singletonList', 'unmodifiableList', 'unmodifiableSet',
+        'unmodifiableMap', 'emptyList', 'emptySet', 'emptyMap', 'listOf', 'setOf', 'mapOf'];
+      if (staticPassthrough.includes(method) && scanResults) {
+        // 提取方法参数（括号内的内容）
+        const argsMatch = text.match(/\(\s*(.+?)\s*\)/);
+        if (argsMatch) {
+          const argsText = argsMatch[1]!;
+          const argParts = this.traceArgParts(argsText, callSite, scanResults);
+          if (argParts.length > 0) {
+            return argParts.map(part => ({
+              ...part,
+              methodSignature: part.methodSignature
+                ? `${part.methodSignature} → ${receiver}.${method}()`
+                : `${receiver}.${method}()`,
+            }));
+          }
+        }
+      }
+
+      // ── 特殊方法: String.split / getBytes 等 → 传递 receiver 的来源 ──
+      // 如果 receiver 是拼接 (COMMAND_C + COMMAND_WHITELIST.get(index))
+      // split() 后每个 part 的来源仍然对应原始拼接的各部分
+      const passthroughMethods = ['split', 'getBytes', 'toString', 'trim', 'substring',
+        'toLowerCase', 'toUpperCase', 'replace', 'replaceAll', 'valueOf'];
+      if (passthroughMethods.includes(method) && scanResults) {
+        // 递归追踪 receiver 变量来源
+        const receiverParts = this.traceVariableParts(receiver, callSite, scanResults);
+        if (receiverParts.length > 0) {
+          // receiver 的来源就是方法返回值的来源
+          // passthrough 方法不改数据来源性质 — 每个原始 part 的 kind 保留
+          // 只需附加 methodSignature 标记经过了什么方法
+          return receiverParts.map(part => ({
+            ...part,
+            methodSignature: part.methodSignature
+              ? `${part.methodSignature} → ${receiver}.${method}()`
+              : `${receiver}.${method}()`,
+          }));
+        }
+      }
+
+      // ── 通用方法: 返回值来源无法推断 ──
       // If receiver is a static final String field, getBytes()/toString() etc. are derivable
       const constantValue = this.getStaticFinalStringValue(receiver, callSite.callerClass);
       if (constantValue !== undefined) {
-        return {
+        return [{
           kind: 'hardcoded',
           value: constantValue,
-          methodSignature: `${receiver}.${method}()`,  // 记录来源
-        };
+          methodSignature: `${receiver}.${method}()`,
+        }];
       }
 
-      return {
+      // 尝试追踪 receiver 变量赋值（如果 scanResults 可用）
+      if (scanResults) {
+        const localAssign = this.traceLocalVariableAssignment(receiver, callSite, scanResults);
+        if (localAssign) {
+          return localAssign.map(part => ({
+            ...part,
+            methodSignature: `${receiver}.${method}()`,
+          }));
+        }
+      }
+
+      return [{
         kind: 'method_return',
         methodSignature: `${receiver}.${method}()`,
-      };
+      }];
     }
-    return { kind: 'unknown' };
+    return [{ kind: 'unknown' }];
   }
 
   private traceFieldPart(text: string, callSite: CallSite): ParamPart {
@@ -643,14 +737,24 @@ export class ParamResolver {
   }
 
   private parseMethodParams(methodDecl: string): MethodParameter[] {
-    const match = methodDecl.match(/\(([^)]*)\)/);
+    // 先去除所有注解: @AnnotationName(...) — 用非贪婪 .*? 匹配括号内容
+    // 必须在 match() 之前处理，否则注解内的括号会干扰参数提取
+    let cleaned = methodDecl.replace(/@[A-Z]\w*\s*\(.*?\)\s*/g, '');
+    // 也要处理无括号的注解: @Override @Deprecated
+    cleaned = cleaned.replace(/@[A-Z]\w*\s+/g, ' ');
+    // 去除 throws 子句
+    cleaned = cleaned.replace(/\s+throws\s+[^{;]+/, '');
+
+    const match = cleaned.match(/\(([^)]*)\)/);
     if (!match) return [];
-    const paramsStr = match[1]!.trim();
+    let paramsStr = match[1]!.trim();
     if (!paramsStr) return [];
 
     const params: MethodParameter[] = [];
     for (const part of this.splitParamsSimple(paramsStr)) {
-      const tokens = part.trim().split(/\s+/);
+      const trimmed = part.trim();
+      if (!trimmed) continue;
+      const tokens = trimmed.split(/\s+/);
       if (tokens.length >= 2) {
         params.push({ type: tokens.slice(0, -1).join(' '), name: tokens[tokens.length - 1]! });
       }
