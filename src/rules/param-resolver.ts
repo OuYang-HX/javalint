@@ -292,10 +292,8 @@ export class ParamResolver {
         return [part];
       }
       // 非外部输入的方法参数，只作为普通变量
-      // 但如果是 Spring Controller 类，所有方法参数都视为外部输入
-      const isControllerClass = callSite.callerClass?.endsWith('Controller') ||
-                                callSite.callerClass?.endsWith('Controller');
-      if (isControllerClass) {
+      // 但如果是 Spring Controller / RequestMapping 类，所有方法参数都视为外部输入
+      if (this.isSpringHandlerClass(callSite)) {
         const crossFile = this.findCrossFileSource(callSite);
         const part: ParamPart = {
           kind: 'external_input',
@@ -569,10 +567,19 @@ export class ParamResolver {
     if (this.staticFinalStrings !== null) return;
 
     this.staticFinalStrings = new Map();
+    
+    // 扫描 src/ 子目录（Maven/Gradle 标准结构）
+    // 如果不存在，扫描项目根目录（单文件/扁平结构）
+    const dirsToScan: string[] = [];
     const srcRoot = path.join(this.projectRoot, 'src');
-    if (!fs.existsSync(srcRoot)) return;
+    if (fs.existsSync(srcRoot)) {
+      dirsToScan.push(srcRoot);
+    } else {
+      dirsToScan.push(this.projectRoot);
+    }
 
-    const javaFiles = this.findJavaFiles(srcRoot);
+    for (const dir of dirsToScan) {
+      const javaFiles = this.findJavaFiles(dir);
     for (const filePath of javaFiles) {
       try {
         const source = fs.readFileSync(filePath, 'utf-8');
@@ -597,6 +604,7 @@ export class ParamResolver {
         }
       } catch { /* ignore read errors */ }
     }
+    } // for dir
   }
 
   /** Get the hardcoded value of a static final String field, or undefined if not found. */
@@ -703,6 +711,58 @@ export class ParamResolver {
   private escapeRegex(s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
+
+  /**
+   * 检查调用点所在类是否是 Spring Handler (Controller/RestController)
+   * 检测策略:
+   *   1. 类名后缀: *Controller, *RestController
+   *   2. 源码注解: @RestController, @Controller, @RequestMapping
+   *   3. 方法注解: @GetMapping, @PostMapping, @RequestMapping, etc.
+   */
+  private isSpringHandlerClass(callSite: CallSite): boolean {
+    const className = callSite.callerClass || '';
+    // 策略1: 类名后缀
+    if (className.endsWith('Controller') || className.endsWith('RestController')) {
+      return true;
+    }
+
+    // 策略2+3: 检查源码中的注解
+    const fullPath = path.join(this.projectRoot, callSite.callerFile);
+    if (!fs.existsSync(fullPath)) return false;
+
+    // 缓存文件内容避免重复读取
+    if (!this._sourceCache) this._sourceCache = new Map();
+    const cacheKey = callSite.callerFile;
+    let source = this._sourceCache.get(cacheKey);
+    if (!source) {
+      source = fs.readFileSync(fullPath, 'utf-8');
+      this._sourceCache.set(cacheKey, source);
+    }
+
+    // 类级注解
+    if (/@(RestController|Controller)\b/.test(source)) {
+      return true;
+    }
+
+    // 方法级注解 — 检查当前方法是否有 RequestMapping 系列注解
+    // 查找方法声明附近的注解
+    const lines = source.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i]!.includes(callSite.callerMethod) &&
+          (lines[i]!.includes('public') || lines[i]!.includes('private') || lines[i]!.includes('protected'))) {
+        // 检查方法声明行及以上几行是否有 RequestMapping 注解
+        for (let j = Math.max(0, i - 3); j <= i; j++) {
+          if (/@(GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)\b/.test(lines[j]!)) {
+            return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private _sourceCache: Map<string, string> | null = null;
 
   private findCrossFileSource(callSite: CallSite): { qualifiedName: string; filePath: string } | null {
     if (!this.cgTraverser) return null;
