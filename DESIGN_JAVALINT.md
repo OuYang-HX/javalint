@@ -1027,3 +1027,160 @@ tree-sitter 的 `resource` 节点没有标准化的子字段名，不同版本�
 ### 11.5 pi-tui CJK 宽度溢出崩溃
 
 pi-coding-agent 输出含中文字符时，pi-tui 的 `visibleWidth()` 计算可能比终端宽度多 1 列，`doRender()` 中 `throw new Error()` 直接崩溃退出。修复: 将 throw 改为防御性截断 `sliceByColumn()`。
+---
+
+## 12. 使用指南
+
+### 12.1 安装
+
+```bash
+cd /home/oyhx/github/javalint
+npm install          # 安装依赖（含 CodeGraph、tree-sitter）
+npm run build        # 编译 TypeScript → dist/
+npm link             # 全局注册 javalint 命令
+```
+
+### 12.2 分析整个项目
+
+```bash
+# 最基本用法 — 分析当前目录下的 Java 项目
+javalint analyze /path/to/java-project
+
+# 只显示 critical 和 high 级别告警
+javalint analyze /path/to/project --severity high
+
+# JSON 输出（适合 CI/CD 集成）
+javalint analyze /path/to/project --format json
+
+# 清除旧告警重新分析
+javalint analyze /path/to/project --clear
+
+# 禁用跨文件污点追踪（加速分析）
+javalint analyze /path/to/project --no-taint
+```
+
+**退出码**:
+- `0` — 无 critical/high 告警
+- `1` — 存在 critical/high 告警
+- `2` — 运行错误
+
+### 12.3 分析单个文件
+
+```bash
+# 只检测一个文件
+javalint analyze /path/to/project/src/main/java/com/example/Service.java
+
+# 结果只包含该文件的告警
+```
+
+### 12.4 依赖 jar 包索引（关键步骤）
+
+JavaLint 默认只索引 179 个 JDK 安全常用类。如果你的项目使用了 **Spring、MyBatis、Jackson** 等第三方库，需要先构建依赖索引，让 JavaLint 能解析这些库的返回类型。
+
+#### 方式一: 从 pom.xml 自动解析项目依赖（推荐）
+
+```bash
+# 自动解析 pom.xml 依赖，在本地仓库找 jar
+javalint build-index /path/to/project --pom /path/to/project/pom.xml
+
+# 指定 Maven settings.xml（获取自定义本地仓库路径）
+javalint build-index /path/to/project \
+  --pom /path/to/project/pom.xml \
+  --settings ~/.m2/settings.xml
+```
+
+**工作原理**:
+
+```
+1. 解析 settings.xml → 获取本地 Maven 仓库路径 (默认 ~/.m2/repository)
+2. 解析 pom.xml → 提取 GAV 坐标 (groupId:artifactId:version)
+3. 递归解析 parent pom → 发现传递依赖
+4. 在本地仓库定位 jar 包 → 跳过 test/provided 作用域
+5. jar tf 提取类名 → javap -public -s 解析方法签名
+6. 合并 JDK 索引 + 依赖索引 → 输出统一 JSON
+```
+
+#### 方式二: 扫描整个 Maven 本地仓库（全量，慢）
+
+```bash
+# 扫描 ~/.m2/repository 下所有 jar（几万类，10s+）
+javalint build-index --maven
+```
+
+#### 让分析使用自定义索引
+
+```bash
+# 替换默认索引（全局生效）
+cp /path/to/api-index.json /home/oyhx/github/javalint/src/analyzer/jdk-api-index.json
+npm run build
+```
+
+### 12.5 查看可用规则
+
+```bash
+javalint list-rules
+```
+
+### 12.6 查看 CodeGraph 跨文件调用图
+
+```bash
+# 项目概览
+javalint graph /path/to/project
+
+# 聚焦某个方法
+javalint graph /path/to/project --method findByUsername
+```
+
+### 12.7 完整工作流示例
+
+```bash
+# Step 1: 确保项目有 CodeGraph 索引（可选但推荐）
+cd /path/to/project
+codegraph index
+
+# Step 2: 构建包含项目依赖的 API 索引
+javalint build-index /path/to/project \
+  --pom /path/to/project/pom.xml
+
+# Step 3: 分析整个项目
+javalint analyze /path/to/project
+
+# 或者只检测一个文件
+javalint analyze /path/to/project/src/main/java/com/example/Controller.java
+
+# Step 4: CI/CD — 只在发现 high+ 告警时失败
+javalint analyze /path/to/project --severity high --format json
+```
+
+### 12.8 输出解读
+
+```
+📍 UserService.java:33                           ← 告警位置
+   [JL-S001] SQL Injection Risk                   ← 规则 ID 和名称
+   Statement.executeQuery() with SQL concatenation ← 告警消息
+   Signature: java.sql.Statement.executeQuery()    ← 完整方法签名
+   Source:    ResultSet rs = stmt.executeQuery(sql); ← 源码行
+   Confidence: high                                ← 置信度
+
+   🔗 Taint chain:                                ← 污点链（如果有）
+      Source: handleGetUser() in UserController.java ← 污点来源
+      Tainted params: requestParam                 ← 被污染的参数
+      Propagation: handleGetUser → findByUsername   ← 传播路径
+      Depth: 1, Confidence: medium                  ← 深度和置信度
+      Reason: Parameter name(s) match taint pattern ← 判定原因
+```
+
+**置信度含义**:
+- `high` — 确认漏洞（参数含外部输入 + 危险 sink + 拼接/注入模式）
+- `medium` — 可能漏洞（方法签名匹配但参数来源不确定）
+- `low` — 低风险（签名匹配但参数为硬编码/安全模式）
+
+### 12.9 环境要求
+
+| 依赖 | 版本 | 说明 |
+|---|---|---|
+| Node.js | 22+ | `node:sqlite` 实验性 API |
+| JDK | 17+ | `javap` 命令（仅构建索引时需要） |
+| Python 3 | 3.8+ | 可选，运行 `.py` 规则脚本 |
+| Groovy | 3.x | 可选，运行 `.groovy` 规则脚本 |
+| CodeGraph | 0.9+ | 可选，跨文件分析需要 |

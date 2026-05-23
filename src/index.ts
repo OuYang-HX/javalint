@@ -39,6 +39,7 @@ import { AlertDatabase } from './db/alert-database';
 
 export class JavaLint {
   private projectRoot: string;
+  private targetFile?: string;  // 可指定单个文件
   private callCollector: CallCollector | null = null;
   private deepScanner: DeepCallScanner | null = null;
   private cgTraverser: CodeGraphTraverser | null = null;
@@ -47,8 +48,9 @@ export class JavaLint {
   private alertDb: AlertDatabase | null = null;
   private rulesDir: string;
 
-  constructor(projectRoot: string, rulesDir?: string) {
+  constructor(projectRoot: string, rulesDir?: string, targetFile?: string) {
     this.projectRoot = path.resolve(projectRoot);
+    this.targetFile = targetFile;
     this.rulesDir = rulesDir || path.join(__dirname, '..', 'rules');
     this.ruleEngine = new RuleEngine(this.rulesDir);
   }
@@ -107,16 +109,21 @@ export class JavaLint {
   /**
    * Run analysis
    */
-  async analyze(): Promise<AnalysisResult> {
+  async analyze(targetFile?: string): Promise<AnalysisResult> {
     const startTime = Date.now();
 
     if (!this.deepScanner || !this.alertDb) {
       throw new Error('JavaLint not initialized. Call init() first.');
     }
 
+    // 允许覆盖 targetFile
+    const scanTarget = targetFile || this.targetFile;
+
     // ── Layer 1: Deep scan ──────────────────────────────────────────
     console.log('\n🔍 Deep scanning Java source files (tree-sitter)...');
-    const scanResults = this.deepScanner.scanAll();
+    const scanResults = scanTarget
+      ? [this.deepScanner.scanFile(path.relative(this.projectRoot, scanTarget))]
+      : this.deepScanner.scanAll();
     let totalRawCalls = 0;
     for (const r of scanResults) totalRawCalls += r.calls.length;
     console.log(`  Scanned ${scanResults.length} files, found ${totalRawCalls} method calls`);

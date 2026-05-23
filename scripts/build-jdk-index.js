@@ -506,11 +506,15 @@ function main() {
   let outputPath = path.join(__dirname, '..', 'src', 'analyzer', 'jdk-api-index.json');
   let includeMaven = false;
   let mavenRepoPath = path.join(process.env.HOME || '/root', '.m2', 'repository');
+  let pomPath = null;
+  let settingsPath = null;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '-o' && args[i + 1]) { outputPath = args[++i]; }
     else if (args[i] === '--maven') { includeMaven = true; }
     else if (args[i] === '-p' && args[i + 1]) { mavenRepoPath = args[++i]; }
+    else if (args[i] === '--pom' && args[i + 1]) { pomPath = args[++i]; }
+    else if (args[i] === '--settings' && args[i + 1]) { settingsPath = args[++i]; }
   }
 
   const startTime = Date.now();
@@ -521,7 +525,19 @@ function main() {
   console.log(`  ${jdkStats.classCount} classes, ${jdkStats.methodCount} methods (${jdkStats.overloadCount} overloads), ${jdkStats.fieldCount} fields`);
 
   let mavenClasses = {};
-  if (includeMaven) {
+  if (pomPath) {
+    // ── Mode 1: Project-specific dependency resolution ──
+    const { MavenResolver } = require('./maven-resolver');
+    const resolver = new MavenResolver(settingsPath, mavenRepoPath);
+    const { classNames, classpath } = resolver.resolveProjectClasses(pomPath);
+    if (classNames.length > 0) {
+      console.log(`\n  Running javap on ${classNames.length} project dependency classes...`);
+      mavenClasses = extractBatch(classNames, classpath);
+      const mvnStats = computeStats(mavenClasses);
+      console.log(`  ${mvnStats.classCount} classes, ${mvnStats.methodCount} methods, ${mvnStats.fieldCount} fields`);
+    }
+  } else if (includeMaven) {
+    // ── Mode 2: Full Maven repo scan (legacy) ──
     console.log(`\nScanning Maven local repository: ${mavenRepoPath}`);
     const { classes, classpath } = discoverMavenClasses(mavenRepoPath);
     console.log(`  Found ${classes.length} classes in ${classpath.split(':').length} jars`);

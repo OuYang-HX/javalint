@@ -3,11 +3,22 @@
 /**
  * JavaLint CLI - Commander-based command line interface
  *
- * Extended with cross-file taint analysis and CodeGraph graph queries.
+ * Commands:
+ *   analyze [path]     分析 Java 项目（可指定文件或目录）
+ *   list-rules         列出所有可用规则
+ *   graph [path]       显示 CodeGraph 跨文件调用图
+ *   build-index        构建 JDK/依赖 API 索引
+ *
+ * Options:
+ *   --pom <path>       指定 pom.xml 自动发现依赖 jar
+ *   --settings <path>  指定 Maven settings.xml（获取本地仓库路径）
  */
 
 import { Command } from 'commander';
 import { JavaLint } from '../index';
+import { execSync } from 'child_process';
+import * as path from 'path';
+import * as fs from 'fs';
 
 const program = new Command();
 
@@ -18,20 +29,42 @@ program
 
 program
   .command('analyze [path]')
-  .description('Analyze a Java project for violations')
+  .description('Analyze a Java project for security violations')
   .option('-r, --rules <dir>', 'Custom rules directory')
   .option('--severity <level>', 'Minimum severity to report (critical, high, medium, low, info)', 'medium')
   .option('--format <fmt>', 'Output format: text, json', 'text')
   .option('--clear', 'Clear previous alerts before analysis', false)
   .option('--no-taint', 'Disable cross-file taint analysis', false)
+  .option('--pom <path>', 'Path to pom.xml for dependency resolution')
+  .option('--settings <path>', 'Path to Maven settings.xml')
   .action(async (projectPath?: string, options?: any) => {
-    const root = projectPath || process.cwd();
-    const rulesDir = options?.rules;
+    const target = projectPath || process.cwd();
+
+    // 确定是文件还是目录
+    const isFile = fs.existsSync(target) && fs.statSync(target).isFile();
+    // 项目根目录：如果是文件，往上找到包含 .codegraph 的目录，否则用文件所在目录
+    let root: string;
+    if (isFile) {
+      // 从文件所在目录往上搜索 .codegraph
+      let dir = path.dirname(target);
+      root = dir;
+      for (let i = 0; i < 5; i++) {
+        if (fs.existsSync(path.join(dir, '.codegraph'))) {
+          root = dir;
+          break;
+        }
+        const parent = path.dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+      }
+    } else {
+      root = target;
+    }
 
     console.log(`\n🛡️  JavaLint - Java Static Code Analysis`);
-    console.log(`   Project: ${root}`);
+    console.log(`   ${isFile ? 'File' : 'Project'}: ${target}`);
 
-    const lint = new JavaLint(root, rulesDir);
+    const lint = new JavaLint(root, options?.rules, isFile ? target : undefined);
 
     try {
       await lint.init();
@@ -40,7 +73,17 @@ program
         console.log('   Clearing previous alerts...');
       }
 
-      const result = await lint.analyze();
+      const result = await lint.analyze(isFile ? target : undefined);
+
+      // 过滤：如果指定了单个文件，只显示该文件的告警
+      if (isFile && result.alerts) {
+        const relTarget = path.relative(root, target);
+        result.alerts = result.alerts.filter(a => {
+          const relAlert = path.relative(root, a.filePath);
+          return relAlert === relTarget || target.endsWith(a.filePath);
+        });
+        result.alertCount = result.alerts.length;
+      }
 
       if (options?.format === 'json') {
         console.log(JSON.stringify(result, null, 2));
@@ -48,7 +91,7 @@ program
         lint.printResults(result);
       }
 
-      // Exit with error code if there are critical/high alerts
+      // 退出码
       const criticalCount = result.alerts.filter(a =>
         a.severity === 'critical' || a.severity === 'high'
       ).length;
@@ -78,7 +121,7 @@ program
     console.log(`\n📚 Available Rules (${count}):\n`);
     for (const rule of rules) {
       const taintBadge = rule.requiresTaintAnalysis ? ' [cross-file]' : '';
-      console.log(`  ${rule.id} - ${rule.name} [${rule.severity}]${taintBadge}`);
+      console.log(`  [${rule.id}] ${rule.name} [${rule.severity}]${taintBadge}`);
       console.log(`    ${rule.description}`);
       console.log(`    Patterns: ${rule.signaturePatterns.join(', ')}`);
       if (rule.tags.length > 0) {
@@ -95,6 +138,7 @@ program
   .option('--method <name>', 'Focus on a specific method')
   .action(async (projectPath?: string, options?: any) => {
     const root = projectPath || process.cwd();
+
     const lint = new JavaLint(root);
 
     try {
@@ -110,17 +154,18 @@ program
       const depth = parseInt(options?.depth || '3', 10);
 
       if (options?.method) {
-        // Show call graph for a specific method
-        const methods = traverser.findMethodNodes(options.method);
-        if (methods.length === 0) {
-          console.error(`No method found with name: ${options.method}`);
+        // Focus on a specific method
+        const methods = traverser.getAllJavaMethods();
+        const found = methods.filter(m => m.name === options.method || m.qualifiedName.includes(options.method));
+
+        if (found.length === 0) {
+          console.log(`\n❌ Method "${options.method}" not found`);
           lint.close();
-          process.exit(1);
+          return;
         }
 
-        for (const method of methods) {
-          console.log(`\n📊 Call graph for ${method.qualifiedName} (${method.filePath}:${method.startLine})`);
-          console.log(`   Signature: ${method.signature || 'N/A'}`);
+        for (const method of found) {
+          console.log(`\n🔍 ${method.qualifiedName} [${method.filePath}:${method.startLine}]`);
 
           // Callers
           const callers = traverser.getCallers(method.id, depth);
@@ -161,6 +206,32 @@ program
       console.error('\n❌ Error:', (e as Error).message);
       lint.close();
       process.exit(2);
+    }
+  });
+
+program
+  .command('build-index [path]')
+  .description('Build API index from JDK and/or project Maven dependencies')
+  .option('--pom <path>', 'Path to pom.xml for dependency resolution')
+  .option('--settings <path>', 'Path to Maven settings.xml')
+  .option('--maven', 'Scan entire Maven local repo (legacy, slow)')
+  .option('-o, --output <path>', 'Output JSON path')
+  .option('-p, --repo <path>', 'Maven repo path')
+  .action(async (projectPath?: string, options?: any) => {
+    const root = projectPath || process.cwd();
+    const scriptPath = path.join(__dirname, '..', '..', 'scripts', 'build-jdk-index.js');
+
+    const args = ['node', scriptPath];
+    if (options?.pom) args.push('--pom', options.pom);
+    if (options?.settings) args.push('--settings', options.settings);
+    if (options?.maven) args.push('--maven');
+    if (options?.output) args.push('-o', options.output);
+    if (options?.repo) args.push('-p', options.repo);
+
+    try {
+      execSync(args.join(' '), { stdio: 'inherit' });
+    } catch (e) {
+      process.exit((e as any).status || 2);
     }
   });
 
