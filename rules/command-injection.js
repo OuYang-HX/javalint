@@ -1,12 +1,13 @@
 /**
  * Command Injection check script — Node.js
  *
- * Detects Runtime.exec() and ProcessBuilder usage with external input.
+ * 参数来源三级风险模型:
+ *   - external_input (Controller 方法参数) → HIGH — 明确攻击面，确认注入
+ *   - tainted (普通方法参数/未溯源变量)     → MEDIUM — 潜在污点，溯源截断在普通函数
+ *   - hardcoded (字面量/白名单/static final) → 不告警 或 LOW
  *
- * Decision logic:
- *   - External input → alert (high confidence)
- *   - Hardcoded only → no alert (safe pattern)
- *   - Unknown source → alert (medium confidence, manual review needed)
+ * isTainted = isExternalInput || kind==='tainted'
+ *   → 脚本用 isExternalInput 区分 high/medium
  */
 
 module.exports.check = function(ctx) {
@@ -17,119 +18,108 @@ module.exports.check = function(ctx) {
   const fullClass = sink.packageName ? sink.packageName + '.' + sink.className : sink.className;
   const methodName = sink.methodName;
 
-  // ── Runtime.exec() ──────────────────────────────────────────────────
+  // ── Runtime.exec() ─────────────────────────────────────────────────
   if (fullClass === 'java.lang.Runtime' && methodName === 'exec') {
     const hasExternalInput = params.some(p => p.isExternalInput);
+    const hasTainted = params.some(p => p.isTainted && !p.isExternalInput);
     const hasHardcoded = params.some(p => p.isHardcoded);
-    const allHardcoded = params.some(p => p.isHardcoded) && !params.some(p => p.isExternalInput);
 
     if (hasExternalInput || taint) {
-      let msg = 'Runtime.exec() executes external commands — command injection risk (CWE-78).';
+      let msg = 'Runtime.exec() — CONFIRMED command injection risk (CWE-78).';
       let conf = 'high';
       if (taint) {
-        msg += ` [Taint from ${taint.sourceMethod}() via ${taint.propagationPath} — CONFIRMED injection]`;
-      } else {
-        msg += ' [External input detected in command parameters — CONFIRMED injection]';
+        msg += ` [Taint from ${taint.sourceMethod}() via ${taint.propagationPath}]`;
       }
-      // Show which params are external input
-      const extParts = [];
-      for (const p of params) {
-        if (p.isExternalInput) {
-          for (const part of (p.parts || [])) {
-            if (part.kind === 'external_input') {
-              extParts.push(part.name || `param#${p.position}`);
-            }
-          }
-        }
-      }
-      if (extParts.length > 0) {
-        msg += ` Tainted: ${extParts.join(', ')}`;
-      }
+      const tainted = collectTaintedNames(params, 'external_input');
+      if (tainted.length > 0) msg += ` External input: ${tainted.join(', ')}`;
       return { alert: true, message: msg, confidence: conf };
     }
 
-    if (allHardcoded) {
-      // Hardcoded command — not injection, but still unsafe pattern (low risk)
-      return { alert: true, message: 'Runtime.exec() with hardcoded command — low injection risk but prefer ProcessBuilder with separate tokens (CWE-78)', confidence: 'low' };
+    if (hasTainted) {
+      const tainted = collectTaintedNames(params, 'tainted');
+      let msg = `Runtime.exec() — potential command injection risk (CWE-78). Parameter source unresolved (traced to ordinary method): ${tainted.join(', ')}`;
+      return { alert: true, message: msg, confidence: 'medium' };
     }
 
-    // Unknown source — medium risk
+    if (hasHardcoded) {
+      const allHardcoded = params.every(p =>
+        p.isHardcoded && (p.parts || []).every(part => part.kind === 'hardcoded')
+      );
+      if (allHardcoded) {
+        return { alert: false };
+      }
+      return { alert: true, message: 'Runtime.exec() with hardcoded command — low injection risk (CWE-78)', confidence: 'low' };
+    }
+
     return { alert: true, message: 'Runtime.exec() — command injection risk (CWE-78). Use ProcessBuilder with separate argument tokens.', confidence: 'medium' };
   }
 
-  // ── ProcessBuilder ──────────────────────────────────────────────────
+  // ── ProcessBuilder ─────────────────────────────────────────────────
   if (fullClass === 'java.lang.ProcessBuilder') {
-    const hasExternalInput = params.some(p => p.isExternalInput);
-    const hasHardcoded = params.some(p => p.isHardcoded);
-
-    // ProcessBuilder 构造器参数来自构造器调用的参数解析
-    // 对于 new ProcessBuilder(commands)，params 是构造器参数
-    // 对于 processBuilder.start()，params 是空（start 无参数）
-
+    // ProcessBuilder.start() — 无参数
     if (methodName === 'start') {
-      // ProcessBuilder.start() 本身无参数
-      // 如果有污点链 → 告警 high
       if (taint) {
         return {
           alert: true,
-          message: `ProcessBuilder.start() — command injection risk. [Taint from ${taint.sourceMethod}() via ${taint.propagationPath} — CONFIRMED injection] (CWE-78)`,
+          message: `ProcessBuilder.start() — CONFIRMED command injection. [Taint from ${taint.sourceMethod}() via ${taint.propagationPath}] (CWE-78)`,
           confidence: 'high'
         };
       }
-      // start() 无参数且无污点链 → 不告警
-      // 构造器的安全性由 ProcessBuilder(*) 或 ProcessBuilder.ProcessBuilder(*) 模式单独检查
+      // start() 无参数且无污点链 → 不告警 (构造器参数安全性由 ProcessBuilder(*) 模式单独检查)
       return { alert: false };
     }
 
     // ProcessBuilder 构造器 / command() — 有参数可分析
-    if (hasExternalInput) {
+    const hasExternalInput = params.some(p => p.isExternalInput);
+    const hasTainted = params.some(p => p.isTainted && !p.isExternalInput);
+    const hasHardcoded = params.some(p => p.isHardcoded);
+
+    // HIGH: Controller 外部输入 → 明确攻击面
+    if (hasExternalInput || taint) {
       let msg = 'ProcessBuilder with external input — CONFIRMED command injection risk (CWE-78).';
-      const extParts = [];
-      for (const p of params) {
-        if (p.isExternalInput) {
-          for (const part of (p.parts || [])) {
-            if (part.kind === 'external_input') {
-              extParts.push(part.name || `param#${p.position}`);
-              if (part.crossFile) {
-                msg += ` [Cross-file: ${part.callerMethod} in ${part.callerFile}]`;
-              }
-            }
-          }
-        }
-      }
-      if (extParts.length > 0) {
-        msg += ` Tainted: ${extParts.join(', ')}`;
-      }
+      let conf = 'high';
       if (taint) {
         msg += ` [Taint from ${taint.sourceMethod}() via ${taint.propagationPath}]`;
       }
-      return { alert: true, message: msg, confidence: 'high' };
+      const tainted = collectTaintedNames(params, 'external_input');
+      if (tainted.length > 0) msg += ` External input: ${tainted.join(', ')}`;
+      return { alert: true, message: msg, confidence: conf };
     }
 
-    if (taint) {
-      return {
-        alert: true,
-        message: `ProcessBuilder — command injection risk. [Taint from ${taint.sourceMethod}() via ${taint.propagationPath} — CONFIRMED injection] (CWE-78)`,
-        confidence: 'high'
-      };
+    // MEDIUM: 普通方法参数/未溯源变量 → 潜在污点，溯源截断在普通函数
+    if (hasTainted) {
+      const tainted = collectTaintedNames(params, 'tainted');
+      let msg = `ProcessBuilder with unresolved parameter source — potential command injection risk (CWE-78). Tainted param(s): ${tainted.join(', ')} (source traced to ordinary method, not a Controller)`;
+      return { alert: true, message: msg, confidence: 'medium' };
     }
 
-    // 全部硬编码 → 不告警
-    if (hasHardcoded && !hasExternalInput) {
-      // 检查是否所有 parts 都是 hardcoded
+    // LOW/不告警: 全部硬编码
+    if (hasHardcoded) {
       const allPartsHardcoded = params.every(p =>
         p.isHardcoded && (p.parts || []).every(part => part.kind === 'hardcoded')
       );
       if (allPartsHardcoded) {
         return { alert: false };
       }
-      // 部分 hardcode + 部分 unknown → low risk
-      return { alert: true, message: 'ProcessBuilder with hardcoded commands — low injection risk but verify no user input reaches the process (CWE-78)', confidence: 'low' };
+      // 部分 hardcode + 部分 other → low
+      return { alert: true, message: 'ProcessBuilder with hardcoded commands — low injection risk (CWE-78)', confidence: 'low' };
     }
 
-    // 未知来源 → medium
+    // 完全未知 → medium
     return { alert: true, message: 'ProcessBuilder — command injection risk. Verify arguments are not from user input (CWE-78).', confidence: 'medium' };
   }
 
   return { alert: false };
 };
+
+function collectTaintedNames(params, kind) {
+  const names = [];
+  for (const p of params) {
+    for (const part of (p.parts || [])) {
+      if (part.kind === kind) {
+        names.push(part.name || `param#${p.position}`);
+      }
+    }
+  }
+  return names;
+}

@@ -121,6 +121,7 @@ export class ParamResolver {
   ): ParamSourceInfo {
     const isHardcoded = parts.some(p => p.kind === 'hardcoded');
     const isExternalInput = parts.some(p => p.kind === 'external_input');
+    const isTainted = parts.some(p => p.kind === 'external_input' || p.kind === 'tainted');
     const isResolvable = parts.every(p => p.kind !== 'unknown');
 
     // 判断 composite
@@ -140,8 +141,13 @@ export class ParamResolver {
     }
 
     // confidence
+    // Controller 外部输入 → high (明确攻击面)
+    // 普通函数参数/未溯源变量 → medium (潜在污点，溯源截断在普通函数)
+    // 硬编码 → high (确定安全)
+    // 未知 → low
     let confidence: 'high' | 'medium' | 'low';
     if (isExternalInput) confidence = 'high';
+    else if (isTainted) confidence = 'medium';
     else if (isHardcoded && parts.length === 1) confidence = 'high';
     else if (isResolvable) confidence = 'medium';
     else confidence = 'low';
@@ -151,7 +157,7 @@ export class ParamResolver {
       type,
       isHardcoded,
       isExternalInput,
-      isTainted: isExternalInput,
+      isTainted,
       isResolvable,
       composite,
       parts,
@@ -276,23 +282,30 @@ export class ParamResolver {
     if (methodParam) {
       const isExternal = EXTERNAL_INPUT_PATTERNS.some(p => p.test(varName));
       if (isExternal) {
-        // 检查是否跨文件传入
-        const crossFile = this.findCrossFileSource(callSite);
-        const part: ParamPart = {
-          kind: 'external_input',
-          source: 'method_parameter',
-          name: varName,
-          type: methodParam.type,
-          crossFile: !!crossFile,
-        };
-        if (crossFile) {
-          part.callerMethod = crossFile.qualifiedName;
-          part.callerFile = crossFile.filePath;
+        // 参数名暗示外部输入 (如 userInput, requestParam)
+        // Controller 类 → 明确 external_input (high risk)
+        // 普通类 → tainted (medium risk, 溯源截断在普通函数)
+        if (this.isSpringHandlerClass(callSite)) {
+          const crossFile = this.findCrossFileSource(callSite);
+          const part: ParamPart = {
+            kind: 'external_input',
+            source: 'method_parameter',
+            name: varName,
+            type: methodParam.type,
+            crossFile: !!crossFile,
+          };
+          if (crossFile) {
+            part.callerMethod = crossFile.qualifiedName;
+            part.callerFile = crossFile.filePath;
+          }
+          return [part];
         }
-        return [part];
+        // 普通类 — 参数名暗示外部输入但无法确认
+        return [{ kind: 'tainted', source: 'method_parameter', name: varName, type: methodParam.type }];
       }
-      // 非外部输入的方法参数，只作为普通变量
-      // 但如果是 Spring Controller / RequestMapping 类，所有方法参数都视为外部输入
+      // 非外部输入的方法参数
+      // Controller 类 → 明确外部输入 (high risk)
+      // 普通类 → 不确定污点 (medium risk, 溯源截断在普通函数)
       if (this.isSpringHandlerClass(callSite)) {
         const crossFile = this.findCrossFileSource(callSite);
         const part: ParamPart = {
@@ -308,7 +321,8 @@ export class ParamResolver {
         }
         return [part];
       }
-      return [{ kind: 'variable', varName, type: methodParam.type }];
+      // 普通方法参数 — 无法确定来源，视为潜在污点
+      return [{ kind: 'tainted', source: 'method_parameter', name: varName, type: methodParam.type }];
     }
 
     // Step 2: 是否是 static final String 常量？
@@ -321,24 +335,28 @@ export class ParamResolver {
     const localParts = this.traceLocalVariableAssignment(varName, callSite, scanResults);
     if (localParts) return localParts;
 
-    // Step 3: 变量名匹配外部输入模式（模糊匹配）
+    // Step 5: 变量名匹配外部输入模式（模糊匹配）
     if (EXTERNAL_INPUT_PATTERNS.some(p => p.test(varName))) {
-      const crossFile = this.findCrossFileSource(callSite);
-      const part: ParamPart = {
-        kind: 'external_input',
-        source: 'variable_pattern',
-        name: varName,
-        crossFile: !!crossFile,
-      };
-      if (crossFile) {
-        part.callerMethod = crossFile.qualifiedName;
-        part.callerFile = crossFile.filePath;
+      if (this.isSpringHandlerClass(callSite)) {
+        const crossFile = this.findCrossFileSource(callSite);
+        const part: ParamPart = {
+          kind: 'external_input',
+          source: 'variable_pattern',
+          name: varName,
+          crossFile: !!crossFile,
+        };
+        if (crossFile) {
+          part.callerMethod = crossFile.qualifiedName;
+          part.callerFile = crossFile.filePath;
+        }
+        return [part];
       }
-      return [part];
+      // 普通类 — 变量名暗示外部输入但无法确认
+      return [{ kind: 'tainted', source: 'variable_pattern', name: varName }];
     }
 
-    // Fallback
-    return [{ kind: 'variable', varName }];
+    // Fallback: 无法确定来源的变量 → 视为潜在污点
+    return [{ kind: 'tainted', source: 'unresolved', name: varName }];
   }
 
   // ══════════════════════════════════════════════════════════════════

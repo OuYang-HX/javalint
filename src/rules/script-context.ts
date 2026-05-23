@@ -152,7 +152,7 @@ export interface ParamSourceInfo {
  */
 export interface ParamPart {
   /** 此部分的来源类别 */
-  kind: 'hardcoded' | 'external_input' | 'method_return' | 'field' | 'variable' | 'unknown';
+  kind: 'hardcoded' | 'external_input' | 'tainted' | 'method_return' | 'field' | 'variable' | 'unknown';
 
   // ── hardcoded ──
   /** 硬编码的具体值 */
@@ -160,7 +160,7 @@ export interface ParamPart {
 
   // ── external_input ──
   /** 外部输入的更细粒度来源 */
-  source?: 'method_parameter' | 'servlet_request' | 'spring_annotation' | 'system_env' | 'config' | 'variable_pattern';
+  source?: 'method_parameter' | 'servlet_request' | 'spring_annotation' | 'system_env' | 'config' | 'variable_pattern' | 'unresolved';
   /** 变量/参数名 */
   name?: string;
   /** 类型 */
