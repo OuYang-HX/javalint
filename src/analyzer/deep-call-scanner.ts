@@ -75,14 +75,21 @@ export class DeepCallScanner {
 
   private findJavaGrammarWasm(): string {
     const candidates = [
-      '/home/oyhx/.npm-global/lib/node_modules/@colbymchenry/codegraph/node_modules/tree-sitter-wasms/out/tree-sitter-java.wasm',
-      '/home/oyhx/github/codegraph/node_modules/tree-sitter-wasms/out/tree-sitter-java.wasm',
+      // 1. 相对于当前文件（dist/analyzer/ → node_modules/）— 通用路径，优先
       path.join(__dirname, '..', '..', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
+      // 2. npm 全局安装路径
+      path.join(process.env.HOME || '/root', '.npm-global', 'lib', 'node_modules', '@colbymchenry', 'codegraph', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
+      // 3. 本地开发路径（开发时使用）
+      path.join(process.env.HOME || '/root', 'github', 'codegraph', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-java.wasm'),
     ];
     for (const c of candidates) {
       if (fs.existsSync(c)) return c;
     }
-    throw new Error('Cannot find tree-sitter-java.wasm');
+    throw new Error(
+      'Cannot find tree-sitter-java.wasm. ' +
+      'Ensure @colbymchenry/codegraph is installed (npm install).\n' +
+      'Searched: ' + candidates.join('\n         ')
+    );
   }
 
   // ─── Scanning ────────────────────────────────────────────────────────
