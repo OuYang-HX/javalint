@@ -1,0 +1,20 @@
+# XPath/LDAP/JNDI Injection Risk (CWE-643/90/917)
+id: JL-S008
+name: XPath/LDAP/JNDI Injection Risk
+severity: critical
+description: "Detects XPath, LDAP, or JNDI operations with user-controllable input which may allow injection attacks"
+signaturePatterns:
+  - "javax.xml.xpath.XPath.compile(*)"
+  - "javax.xml.xpath.XPath.evaluate(*)"
+  - "javax.naming.directory.DirContext.search(*)"
+  - "javax.naming.directory.InitialDirContext.search(*)"
+  - "javax.naming.Context.lookup(*)"
+  - "javax.naming.InitialContext.lookup(*)"
+  - "javax.naming.directory.InitialDirContext.lookup(*)"
+checkScript: "xpath-ldap-jndi.js"
+tags:
+  - security
+  - xpath
+  - ldap
+  - jndi
+  - injection

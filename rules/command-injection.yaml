@@ -1,0 +1,15 @@
+# Command Injection Risk - Runtime.exec / ProcessBuilder
+id: JL-S003
+name: Command Injection Risk
+severity: critical
+description: "Detects execution of external commands via Runtime.exec() or ProcessBuilder that may be vulnerable to command injection (CWE-78)"
+signaturePatterns:
+  - "java.lang.Runtime.exec(*)"
+  - "java.lang.ProcessBuilder.command(*)"
+  - "java.lang.ProcessBuilder.start()"
+  - "java.lang.ProcessBuilder(*)"
+checkScript: "command-injection.js"
+tags:
+  - security
+  - command-injection
+  - rce

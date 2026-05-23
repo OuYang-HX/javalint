@@ -1,0 +1,16 @@
+# SQL Injection Risk - Python check script
+# Uses the rich ScriptContext to analyze parameter sources and taint chains
+id: JL-S001
+name: SQL Injection Risk
+severity: high
+description: "Detects SQL execution via java.sql.Statement (not PreparedStatement) which may use string concatenation"
+signaturePatterns:
+  - "java.sql.Statement.executeQuery(*)"
+  - "java.sql.Statement.executeUpdate(*)"
+  - "java.sql.Statement.execute(*)"
+  - "java.sql.Connection.createStatement(*)"
+checkScript: "sql-injection.py"
+tags:
+  - security
+  - sql
+  - injection

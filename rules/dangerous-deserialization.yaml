@@ -1,0 +1,13 @@
+# Dangerous Deserialization - ObjectInputStream.readObject()
+id: JL-S002
+name: Dangerous Deserialization
+severity: critical
+description: "Detects use of java.io.ObjectInputStream.readObject() which can lead to deserialization attacks (CWE-502)"
+signaturePatterns:
+  - "java.io.ObjectInputStream.readObject(*)"
+  - "java.io.ObjectInputStream.readUnshared(*)"
+checkScript: "dangerous-deserialization.js"
+tags:
+  - security
+  - deserialization
+  - rce

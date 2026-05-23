@@ -1,0 +1,18 @@
+# Log Injection Risk (CWE-117)
+id: JL-S013
+name: Log Injection Risk
+severity: medium
+description: "Detects user-controllable input passed to logger calls which may allow log injection / log forging (CWE-117)"
+signaturePatterns:
+  - "java.util.logging.Logger.info(*)"
+  - "java.util.logging.Logger.warning(*)"
+  - "java.util.logging.Logger.severe(*)"
+  - "java.util.logging.Logger.fine(*)"
+  - "java.util.logging.Logger.finer(*)"
+  - "java.util.logging.Logger.finest(*)"
+  - "java.util.logging.Logger.log(*)"
+checkScript: "log-injection.js"
+tags:
+  - security
+  - log-injection
+  - cwe-117

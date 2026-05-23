@@ -1,0 +1,25 @@
+{
+  "name": "javalint",
+  "version": "0.1.0",
+  "description": "Java static code analysis powered by CodeGraph",
+  "main": "dist/index.js",
+  "bin": {
+    "javalint": "./dist/bin/javalint.js"
+  },
+  "scripts": {
+    "build": "tsc && cp src/analyzer/jdk-api-index.json src/analyzer/jdk-api-index.db dist/analyzer/",
+    "dev": "tsc --watch",
+    "cli": "npm run build && node dist/bin/javalint.js",
+    "test": "node dist/bin/javalint.js analyze"
+  },
+  "dependencies": {
+    "@colbymchenry/codegraph": "^0.9.3",
+    "commander": "^12.1.0",
+    "web-tree-sitter": "^0.25.10",
+    "yaml": "^2.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

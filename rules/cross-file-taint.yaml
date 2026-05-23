@@ -1,0 +1,24 @@
+id: JL-S004
+name: Cross-file Taint Propagation
+severity: high
+description: "User input flows through a call chain to a dangerous API — confirms the vulnerability is exploitable (CWE-9)"
+signaturePatterns:
+  # SQL injection sinks
+  - "java.sql.Statement.executeQuery(*)"
+  - "java.sql.Statement.execute(*)"
+  - "java.sql.Statement.executeUpdate(*)"
+  - "java.sql.Connection.createStatement(*)"
+  # Deserialization sinks
+  - "java.io.ObjectInputStream.readObject(*)"
+  - "java.io.ObjectInputStream.readUnshared(*)"
+  # Command injection sinks
+  - "java.lang.Runtime.exec(*)"
+  - "java.lang.ProcessBuilder.start()"
+  - "java.lang.ProcessBuilder.command(*)"
+checkScript: "cross-file-taint.js"
+tags:
+  - security
+  - taint
+  - cross-file
+  - CWE-9
+requiresTaintAnalysis: true

@@ -1,0 +1,19 @@
+# Insecure Random Number Generator (CWE-338)
+id: JL-S012
+name: Insecure Random
+severity: medium
+description: "Detects use of java.util.Random instead of SecureRandom for security-sensitive operations (CWE-338)"
+signaturePatterns:
+  - "java.util.Random.Random(*)"
+  - "java.util.Random.nextLong(*)"
+  - "java.util.Random.nextInt(*)"
+  - "java.util.Random.nextDouble(*)"
+  - "java.util.Random.nextFloat(*)"
+  - "java.util.Random.nextBoolean(*)"
+  - "java.util.Random.nextBytes(*)"
+  - "java.util.Random.nextGaussian(*)"
+checkScript: "insecure-random.js"
+tags:
+  - security
+  - random
+  - cwe-338

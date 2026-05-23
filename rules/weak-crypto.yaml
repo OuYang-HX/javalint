@@ -1,0 +1,13 @@
+# Weak Cryptography / Hash (CWE-327/328/326)
+id: JL-S010
+name: Weak Cryptography
+severity: high
+description: "Detects use of weak cryptographic algorithms (DES, RC4, ECB mode) or broken hash functions (MD5, SHA-1) (CWE-327/328)"
+signaturePatterns:
+  - "javax.crypto.Cipher.getInstance(*)"
+  - "java.security.MessageDigest.getInstance(*)"
+checkScript: "weak-crypto.js"
+tags:
+  - security
+  - crypto
+  - weak-algorithm

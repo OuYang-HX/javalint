@@ -1,0 +1,16 @@
+# Path Traversal Risk (CWE-22)
+id: JL-S005
+name: Path Traversal Risk
+severity: high
+description: "Detects file operations with user-controllable paths that may allow directory traversal attacks (CWE-22)"
+signaturePatterns:
+  - "java.io.FileInputStream.FileInputStream(*)"
+  - "java.io.FileOutputStream.FileOutputStream(*)"
+  - "java.io.FileReader.FileReader(*)"
+  - "java.io.FileWriter.FileWriter(*)"
+  - "java.io.File.File(*)"
+checkScript: "path-traversal.js"
+tags:
+  - security
+  - path-traversal
+  - file

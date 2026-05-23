@@ -1,0 +1,17 @@
+# XML External Entity (XXE) Risk (CWE-611)
+id: JL-S007
+name: XXE Risk
+severity: critical
+description: "Detects XML parsing without disabling external entities which may allow XXE attacks (CWE-611)"
+signaturePatterns:
+  - "javax.xml.parsers.DocumentBuilder.parse(*)"
+  - "javax.xml.parsers.DocumentBuilderFactory.newInstance(*)"
+  - "javax.xml.transform.TransformerFactory.newInstance(*)"
+  - "javax.xml.validation.SchemaFactory.newInstance(*)"
+  - "org.xml.sax.XMLReader.parse(*)"
+  - "org.dom4j.io.SAXReader.read(*)"
+checkScript: "xxe.js"
+tags:
+  - security
+  - xxe
+  - xml

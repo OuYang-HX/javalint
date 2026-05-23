@@ -1,0 +1,13 @@
+# Server-Side Request Forgery (SSRF) Risk (CWE-918)
+id: JL-S006
+name: SSRF Risk
+severity: high
+description: "Detects HTTP requests to user-controllable URLs which may allow SSRF attacks (CWE-918)"
+signaturePatterns:
+  - "java.net.URL.URL(*)"
+  - "java.net.HttpURLConnection.openConnection(*)"
+checkScript: "ssrf.js"
+tags:
+  - security
+  - ssrf
+  - network

@@ -1,0 +1,14 @@
+# Unsafe Reflection (CWE-470)
+id: JL-S011
+name: Unsafe Reflection
+severity: critical
+description: "Detects Class.forName() or newInstance() with user-controllable input which may allow arbitrary code execution (CWE-470)"
+signaturePatterns:
+  - "java.lang.Class.forName(*)"
+  - "java.lang.Class.newInstance(*)"
+  - "java.lang.reflect.Constructor.newInstance(*)"
+checkScript: "unsafe-reflection.js"
+tags:
+  - security
+  - reflection
+  - rce
