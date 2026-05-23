@@ -486,6 +486,7 @@ export class DeepCallScanner {
       'Double': 'java.lang.Double', 'Float': 'java.lang.Float', 'Boolean': 'java.lang.Boolean',
       'Object': 'java.lang.Object', 'Class': 'java.lang.Class', 'System': 'java.lang.System',
       'Runtime': 'java.lang.Runtime', 'Process': 'java.lang.Process',
+      'ProcessBuilder': 'java.lang.ProcessBuilder',
       'Thread': 'java.lang.Thread', 'Math': 'java.lang.Math',
       'Exception': 'java.lang.Exception', 'RuntimeException': 'java.lang.RuntimeException',
       'Throwable': 'java.lang.Throwable', 'Error': 'java.lang.Error',
