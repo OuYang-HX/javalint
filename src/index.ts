@@ -155,6 +155,14 @@ export class JavaLint {
 
       for (const rule of matchedRules) {
         const checkResult = this.ruleEngine.executeCheck(rule, callSite);
+        // 调试: 匹配了规则但未告警时, 显示ScriptContext的参数信息
+        if (!checkResult.alert && rule.id.startsWith('JL-S0')) {
+          const ctx = this.ruleEngine.buildScriptContext(callSite);
+          const paramSummary = (ctx.params || []).map(p =>
+            `pos${p.position}: ext=${p.isExternalInput},tainted=${p.isTainted},hard=${p.isHardcoded},parts=[${(p.parts||[]).map(pt=>pt.kind+':'+(pt.name||pt.value||pt.varName||'?')).join(',')}]`
+          ).join('; ');
+          console.log(`  DEBUG ${rule.id}@${callSite.callerLine}: ${callSite.fullSignature.fullQualifiedName} | params: ${paramSummary} | result: ${JSON.stringify(checkResult)}`);
+        }
         if (checkResult.alert) {
           const alert = this.ruleEngine.createAlert(rule, callSite, checkResult);
           alerts.push(alert);
